@@ -175,13 +175,13 @@ def status() -> None:
     print(f"Folder: {HERE}")
     if folder := protected_folder():
         print(f"PROBLEM: the folder is inside ~/{folder}; macOS stops background jobs from reading it.\n"
-              f'  Fix: mv "{HERE}" ~/{NAME} && cd ~/{NAME} && {Path(python()).name} app.py schedule')
+              f'  Fix: mv "{HERE}" ~/{NAME} && cd ~/{NAME} && ./setup.sh')
     print(f"Website {URL}: {'UP' if site_up() else 'NOT RESPONDING'}")
     if platform.system() == "Darwin":
         r = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
         jobs = [l for l in r.stdout.splitlines() if NAME in l]
         print("launchd jobs (PID, last exit code, name):")
-        print("\n".join("  " + l for l in jobs) or "  none installed; run: python3 app.py schedule")
+        print("\n".join("  " + l for l in jobs) or "  none installed; run: ./setup.sh")
     print(f"Website log ({SITE_LOG.name}):\n{_tail(SITE_LOG)}")
     print(f"Recorder log ({LOG.name}):\n{_tail(LOG, 8)}")
 
@@ -190,7 +190,7 @@ def install() -> None:
     if folder := protected_folder():
         sys.exit(f"This folder is inside ~/{folder}, and macOS won't let background jobs read it.\n"
                  f"Move it to your home folder, then schedule again:\n\n"
-                 f'  mv "{HERE}" ~/{NAME}\n  cd ~/{NAME}\n  {Path(python()).name} app.py schedule\n')
+                 f'  mv "{HERE}" ~/{NAME}\n  cd ~/{NAME}\n  ./setup.sh\n')
     LOG.parent.mkdir(exist_ok=True)
     system = platform.system()
     {"Darwin": _mac_install, "Windows": _win_install}.get(system, _cron_install)()
