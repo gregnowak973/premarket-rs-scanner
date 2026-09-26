@@ -77,7 +77,7 @@ def fetch_daily(tickers: list[str]) -> dict[str, pd.DataFrame]:
 
 def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> list[str]:
     try:
-        items = yf.Ticker(ticker).news or []
+        items = yf.Ticker(ticker).get_news(count=100) or []
     except Exception:
         return []
     heads = []
@@ -277,7 +277,7 @@ def main() -> None:
     p.add_argument("--asof", help="time of day in ET, HH:MM (default: now, or 09:29 when replaying)")
     p.add_argument("--trend", type=int, default=45, help="trend window in minutes (default 45)")
     p.add_argument("--top", type=int, default=8, help="rows per table (default 8)")
-    p.add_argument("--news", action="store_true", help="fetch headlines from the 18h before the scan for the top movers (live use; Yahoo only keeps recent news)")
+    p.add_argument("--news", action="store_true", help="fetch headlines from the 18h before the scan for the top movers (Yahoo keeps roughly the last day or two)")
     p.add_argument("--watch", type=float, help="rescan every N minutes until 9:45 ET")
     p.add_argument("--csv", help="also write the full ranking to this CSV path")
     args = p.parse_args()

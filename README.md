@@ -36,5 +36,5 @@ A workflow that fits: build the list premarket, and treat names with news as a s
 
 - Yahoo reports zero volume for extended-hours bars, so there is no premarket relative-volume filter. A paid feed such as Polygon or Alpaca SIP would add it.
 - 1-minute history goes back about 30 days, and each fetch covers the last 8 sessions.
-- Yahoo news only keeps recent articles, so `--news` is only meaningful when scanning live.
+- Yahoo news only reaches back a day or two, so `--news` works for live scans and very recent replays.
 - Quotes are free and can lag by a few seconds. This is not investment advice.
