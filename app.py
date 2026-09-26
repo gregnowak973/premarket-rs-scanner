@@ -11,6 +11,7 @@ Records the RS scanner every trading morning and serves the history on a local w
     python app.py unschedule   # remove that background job
     python app.py status       # is the website up? recent log lines, for troubleshooting
     python app.py refresh      # fill in newly added outcome details for days already recorded
+    python app.py signal [YYYY-MM-DD]   # the playbook's trade for today (after 09:35 ET) or a recent day
 
 While the site is running it takes a snapshot at each time in SNAPSHOTS on weekdays,
 with headlines, and after 16:05 ET fills in what each stock did for the rest of the day.
@@ -182,6 +183,56 @@ def at(day: dt.date, hhmm: str) -> dt.datetime:
     return dt.datetime.combine(day, dt.time.fromisoformat(hhmm), tzinfo=rs.NY)
 
 
+def playbook_message(day: dt.date, df: pd.DataFrame) -> tuple[str, str]:
+    """(title, text) for the playbook's call on `day`, from its 09:35 scan."""
+    import playbook as pb
+    rows = df.reset_index().rename(columns={"Ticker": "ticker", "Score": "score", "Last": "last", "PMHi": "pm_hi"})
+    top, rule, why_not = pb.signal(rows, day.isoformat())
+    wday = f"{day:%A}"
+    if top is None:
+        return f"No playbook trade ({wday})", why_not
+    p = pb.plan(top)
+    return (f"{top.ticker} 0DTE calls · {pb.RULE_NAMES[rule]}",
+            f"Entry ~{p['entry']:.2f} · stop {p['stop']:.2f} (−{pb.STOP}%) · sell half {p['half']:.2f} (+{pb.HALF:g}%) · "
+            f"runner {p['runner']:.2f} (+{pb.RUNNER:g}%) · out by {p['exit']}. Score {top.score:+.1f}. "
+            "Stock prices; after selling half, move the stop to entry.")
+
+
+def notify(title: str, text: str) -> None:
+    """Desktop notification where the OS supports it; always printed to the log too."""
+    print(f"NOTIFY: {title}: {text}")
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+            esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}" sound name "Glass"'],
+                           capture_output=True, timeout=10)
+        elif sys.platform.startswith("linux"):
+            import shutil, subprocess
+            if shutil.which("notify-send"):
+                subprocess.run(["notify-send", title, text], capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def signal_now(day: dt.date | None = None) -> tuple[str, str]:
+    """Scan `day` (default today) at 09:35 and return the playbook's call."""
+    import playbook as pb
+    day = day or dt.datetime.now(rs.NY).date()
+    if pb.rule_for(day.isoformat()) is None:
+        return f"No playbook trade ({day:%A})", "Tuesdays and Thursdays are skipped."
+    today = dt.datetime.now(rs.NY).date()
+    if (today - day).days > 25:
+        raise SystemExit("Yahoo's 1-minute data only covers about the last 30 days.")
+    intraday, daily = load_market(day - dt.timedelta(days=5)) if day != today else load_market()
+    if rs.BENCH not in intraday or day not in set(intraday[rs.BENCH].index.date):
+        return f"No session data for {day}", "Market closed, or data not available yet."
+    if day == today and dt.datetime.now(rs.NY) < at(day, pb.ENTRY):
+        return "Too early", f"The playbook signal is taken at {pb.ENTRY} ET."
+    df = rs.scan(load_tickers(), day, at(day, pb.ENTRY), TREND_MIN, intraday, daily, with_news=False)
+    return playbook_message(day, df)
+
+
 def record_live(day: dt.date, hhmm: str) -> None:
     intraday, daily = load_market()
     if rs.BENCH not in intraday or day not in set(intraday[rs.BENCH].index.date):
@@ -192,6 +243,9 @@ def record_live(day: dt.date, hhmm: str) -> None:
     with lock, db() as con:
         save(con, day, hhmm, df, "live")
     print(f"{day} {hhmm}: recorded {len(df)} tickers")
+    import playbook as pb
+    if hhmm == pb.ENTRY and pb.rule_for(day.isoformat()):
+        notify(*playbook_message(day, df))
 
 
 def record_outcomes(days: list[dt.date], intraday, daily, source: str = "replay") -> None:
@@ -385,6 +439,10 @@ def main() -> None:
                 record_due(dt.datetime.now(rs.NY), set())
             except Exception:
                 traceback.print_exc()
+    elif cmd == "signal":
+        d = next((dt.date.fromisoformat(x) for x in sys.argv[2:] if x[:2] == "20"), None)
+        title, text = signal_now(d)
+        print(f"{title}\n{text}")
     elif cmd == "refresh":
         refresh_outcomes(everything="--all" in sys.argv)
     elif cmd in ("schedule", "unschedule", "status"):
