@@ -8,8 +8,8 @@ if [ ! -x .venv/bin/python ]; then
   python3 -m venv .venv
 fi
 echo "Installing libraries ..."
-.venv/bin/python -m pip install --quiet --upgrade pip
-.venv/bin/python -m pip install --quiet -r requirements.txt
+.venv/bin/python -m pip install --quiet --no-cache-dir --upgrade pip
+.venv/bin/python -m pip install --quiet --no-cache-dir -r requirements.txt
 echo "Loading the last ~30 days (about a minute) ..."
 .venv/bin/python app.py backfill
 .venv/bin/python app.py schedule
