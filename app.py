@@ -76,7 +76,7 @@ COLS = {
     "PrevHi": "prev_hi", "PrevLo": "prev_lo", "PrevCl": "prev_cl", "Score": "score",
     "Div": "div", "FwdRS%": "fwd_rs", "FwdHi%": "fwd_hi", "FwdLo%": "fwd_lo",
     "Fwd1h%": "fwd_1h", "FwdNoon%": "fwd_noon", "FwdClose%": "fwd_close",
-    "FwdHiT": "fwd_hi_t", "FwdLoT": "fwd_lo_t", "FwdPath": "fwd_path",
+    "FwdHiT": "fwd_hi_t", "FwdLoT": "fwd_lo_t", "FwdPath": "fwd_path", "OpenVol%": "open_vol",
     "News": "news", "NewsN": "news_n",
 }
 FWD = ["fwd_rs", "fwd_hi", "fwd_lo", "fwd_1h", "fwd_noon", "fwd_close", "fwd_hi_t", "fwd_lo_t", "fwd_path"]

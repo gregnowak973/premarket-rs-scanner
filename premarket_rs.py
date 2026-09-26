@@ -129,6 +129,17 @@ def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> tuple[lis
 
 # ------------------------------------------------------------- metrics ----
 
+def opening_volume(today: pd.DataFrame, daily: pd.DataFrame, day: dt.date, asof: dt.datetime) -> float:
+    """Volume traded from 09:30 up to `asof`, as a % of the stock's 20-day average daily volume.
+    A normal first five minutes is a few percent; a stock being repriced trades far more."""
+    open_ = dt.datetime.combine(day, dt.time(9, 30), tzinfo=NY)
+    if asof <= open_ or "Volume" not in today:
+        return np.nan
+    vol = today["Volume"][(today.index >= open_) & (today.index < asof)].sum()
+    avg = daily["Volume"][daily.index.date < day].tail(20).mean()
+    return float(vol / avg * 100) if avg and avg > 0 and vol > 0 else np.nan
+
+
 def beta_and_vol(daily: pd.DataFrame, bench: pd.DataFrame, before: dt.date,
                  lookback: int = 90) -> tuple[float, float]:
     """Beta to the benchmark and daily return stdev (in %), using data before `before`.
@@ -250,6 +261,7 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
             "PrevHi": prev_reg["High"].max(),
             "PrevLo": prev_reg["Low"].min(),
             "PrevCl": pc,
+            "OpenVol%": opening_volume(today, daily[t], day, asof),
         }
         row["Score"] = row["RSz"] + row["Trendz"]
         # Divergence: stock and SPY moved in opposite directions during the trend window.

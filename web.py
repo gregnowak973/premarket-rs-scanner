@@ -892,7 +892,10 @@ def rank_table(d: pd.DataFrame, news: pd.DataFrame, has_news, t: str, side: str,
                       f'<td>{num(best)}<small class="mute"> {when}</small></td>', f'<td class="l">{vs}</td>']
         cells.append(f'<td class="l"><button class="tog" aria-expanded="false" aria-controls="{rid}" '
                      f'data-key="{key}">Why{badge}</button></td>')
+        ov = r.get("open_vol")
         facts = (f'<div class="facts"><span>Last <b>{r["last"]:.2f}</b></span><span>Gap {num(r.gap)}</span>'
+                 + (f'<span title="Volume since 09:30 as a share of the 20-day average daily volume">Opening volume '
+                    f'<b>{ov:.0f}%</b> of a normal day</span>' if ov is not None and pd.notna(ov) else "") +
                  f"<span>PM hi/lo {r.pm_hi:.2f} / {r.pm_lo:.2f}</span><span>Y hi/lo {r.prev_hi:.2f} / {r.prev_lo:.2f}</span>")
         if hindsight:
             facts += (f"<span>+1h {num(r.fwd_1h)}</span><span>Noon {num(r.fwd_noon)}</span>"
@@ -935,6 +938,9 @@ def signal_card(day: str, t: str, live: bool) -> str:
     p = pb.plan(top)
     reason = (f"score {top.score:+.1f} (≥ {pb.OUTLIER}), the strongest mega cap, above its premarket high"
               if rule == "mega" else f"#1 of the full list (score {top.score:+.1f}), above its premarket high")
+    ov = top.get("open_vol")
+    if ov is not None and pd.notna(ov):
+        reason += f" · traded {ov:.0f}% of a normal day's volume in the first 5 minutes"
     out = ""
     ret, how = pb.simulate(top.get("fwd_path"))
     if ret is not None and not live:
