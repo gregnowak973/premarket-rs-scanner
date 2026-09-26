@@ -37,10 +37,13 @@ Run `.venv/bin/python app.py status`. It shows whether the site is up, whether t
 - **You opened `localhost:8050`.** Use http://127.0.0.1:8050; some Macs send `localhost` to IPv6, where the site isn't listening.
 - **To see errors directly**, run the site in the foreground: `.venv/bin/python app.py serve --site-only`, then open http://127.0.0.1:8050.
 
-Pages:
-- **Home:** for each snapshot time, how the top 5 and bottom 5 did afterward, split by whether the top names had company news. Below that, one row per session.
-- **Day:** the full strength and weakness tables for any snapshot time, with levels, headlines and outcomes.
-- **Ticker:** every recorded session for one stock.
+Pages (`web.py`):
+- **Today** (`/day/today`, and the landing page on trading mornings): the top 2 call and put picks as cards, with entry levels as prices, the latest company headline, and whether the pick has held since 09:35. Below the cards are the strongest and weakest 5 and the rest of the watchlist. Before 09:35 a banner says the ranking is premarket context only. The page reloads itself when a new snapshot arrives.
+- **Day** (`/day/<date>`): the same view for any past session, plus what happened afterward (RS to the close, ✓/✗ for whether it went the trade's way; +1 hour, noon, close and max up/down under *Why*).
+- **Review** (`/review`): the verdict, a chart of strong minus weak by snapshot time with noise bands, a day-by-snapshot heatmap, and every session's picks with ✓/✗.
+- **Ticker** (`/ticker/MSFT`): score vs outcome for every day, and how the stock did when it was a pick.
+
+Keys: `←` `→` change day, `[` `]` change snapshot, `/` jump to a ticker, `t` today, `r` review, `Esc` closes open rows. Blue and orange always mean up or down vs SPY; ✓ and ✗ mean the trade's way or not.
 
 ## Choosing the names
 
