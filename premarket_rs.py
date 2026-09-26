@@ -92,7 +92,13 @@ def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> list[str]
             continue
         if since <= ts <= until:
             heads.append(c.get("title", ""))
-    return heads
+    # Put headlines that name the company first; Yahoo mixes in sector stories.
+    try:
+        name = (yf.Ticker(ticker).info.get("shortName") or "").split()[0].strip(",.")
+    except Exception:
+        name = ""
+    keys = [k.lower() for k in (ticker, name) if k]
+    return sorted(heads, key=lambda h: not any(k in h.lower() for k in keys))
 
 
 # ------------------------------------------------------------- metrics ----
