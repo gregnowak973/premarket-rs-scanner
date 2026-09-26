@@ -10,6 +10,29 @@ python premarket_rs.py --date 2026-09-25 --asof 09:35   # replay a past morning
 python premarket_rs.py --file watchlist.txt --csv out.csv
 ```
 
+## Daily log and local website
+
+`app.py` records the scan every trading morning into a local SQLite database (`data/scans.db`) and serves the history at http://localhost:8050.
+
+```
+python app.py backfill    # once: rebuild the last ~30 days from Yahoo's 1-minute history (about a minute)
+python app.py             # website + recorder; leave it running on weekday mornings
+```
+
+While it runs it takes a snapshot at 08:00, 08:30, 09:00, 09:15, 09:29, 09:35, 09:45 and 10:00 ET, with headlines. After 16:05 ET it records what each stock did for the rest of the day. It also rebuilds any snapshot it missed from the 1-minute history, but without headlines.
+
+Pages:
+- **Home:** for each snapshot time, how the top 5 and bottom 5 did afterward, split by whether the top names had company news. Below that, one row per session.
+- **Day:** the full strength and weakness tables for any snapshot time, with levels, headlines and outcomes.
+- **Ticker:** every recorded session for one stock.
+
+To record without keeping the site open, schedule `python app.py record` every 5 minutes from 08:00 to 16:30 ET on weekdays. Snapshot times are in ET whatever your computer's time zone is. Examples:
+
+- macOS/Linux cron, if your clock is on ET: `*/5 8-16 * * 1-5 cd /path/to/scanner && python3 app.py record`
+- Windows: a Task Scheduler task that runs `python app.py record` in this folder, repeating every 5 minutes.
+
+Then open the site whenever you like with `python app.py`. Change `SNAPSHOTS`, `TICKERS` or `PORT` at the top of `app.py`.
+
 ## Columns
 
 | Column | Meaning |

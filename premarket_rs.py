@@ -61,25 +61,28 @@ def _split(df: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
     return out
 
 
-def fetch_intraday(tickers: list[str]) -> dict[str, pd.DataFrame]:
-    """1-minute bars including pre/post market for the last several sessions."""
-    df = yf.download(tickers, period="8d", interval="1m", prepost=True,
-                     progress=False, group_by="ticker", threads=True)
+def fetch_intraday(tickers: list[str], start: dt.date | None = None,
+                   end: dt.date | None = None) -> dict[str, pd.DataFrame]:
+    """1-minute bars including pre/post market. Yahoo allows 8 days per request, last 30 days."""
+    when = dict(start=start, end=end) if start else dict(period="8d")
+    df = yf.download(tickers, interval="1m", prepost=True, progress=False,
+                     group_by="ticker", threads=True, **when)
     df.index = df.index.tz_convert(NY)
     return _split(df, tickers)
 
 
 def fetch_daily(tickers: list[str]) -> dict[str, pd.DataFrame]:
-    df = yf.download(tickers, period="6mo", interval="1d", progress=False,
+    df = yf.download(tickers, period="1y", interval="1d", progress=False,
                      group_by="ticker", threads=True, auto_adjust=False)
     return _split(df, tickers)
 
 
-def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> list[str]:
+def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> tuple[list[str], int]:
+    """Headlines published in [since, until], company-specific first, and how many name the company."""
     try:
         items = yf.Ticker(ticker).get_news(count=100) or []
     except Exception:
-        return []
+        return [], 0
     heads = []
     for it in items:
         c = it.get("content") or it
@@ -98,7 +101,8 @@ def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> list[str]
     except Exception:
         name = ""
     keys = [k.lower() for k in (ticker, name) if k]
-    return sorted(heads, key=lambda h: not any(k in h.lower() for k in keys))
+    named = [h for h in heads if any(k in h.lower() for k in keys)]
+    return named + [h for h in heads if h not in named], len(named)
 
 
 # ------------------------------------------------------------- metrics ----
@@ -179,7 +183,7 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
             "Beta": beta,
             "RS%": rs,
             "RSz": rs / sig,
-            f"Trend{trend_min}m%": trend,
+            "Trend%": trend,
             "Trendz": trend / trend_sig,
             "PMHi": pm["High"].max() if not pm.empty else np.nan,
             "PMLo": pm["Low"].min() if not pm.empty else np.nan,
@@ -209,10 +213,12 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
         since = asof.astimezone(dt.timezone.utc) - dt.timedelta(hours=18)
         top = df["Score"].abs().sort_values(ascending=False).index[:12]
         df["News"] = ""
+        df["NewsN"] = 0
         for t in top:
-            heads = fetch_news(t, since, asof)
+            heads, named = fetch_news(t, since, asof)
             if heads:
-                df.loc[t, "News"] = f"({len(heads)}) {heads[0][:60]}"
+                df.loc[t, "News"] = heads[0]
+                df.loc[t, "NewsN"] = named
     df.attrs.update(spy_gap=spy_gap, spy_trend=spy_gap - spy_gap_then)
     return df
 
@@ -221,6 +227,8 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
 
 def fmt(df: pd.DataFrame) -> str:
     out = df.copy()
+    if "News" in out:
+        out["News"] = out["News"].str[:60]
     for c in out.columns:
         if out[c].dtype.kind == "f":
             digits = 1 if c.endswith("z") or c == "Score" else 2
@@ -263,7 +271,7 @@ def run_once(args, tickers: list[str]) -> None:
     phase = "premarket" if asof.time() < dt.time(9, 30) else "regular session"
     print(f"\nRS scan ({phase})  |  {day}  as of {asof:%H:%M} ET  |  "
           f"SPY {df.attrs['spy_gap']:+.2f}% (last {args.trend}m {df.attrs['spy_trend']:+.2f}%)")
-    print("Score = RSz (excess gap / daily vol) + Trendz (change in excess gap over the trend window)\n")
+    print(f"Score = RSz (excess gap / daily vol) + Trendz (change in excess gap over the last {args.trend} min)\n")
 
     cols = [c for c in df.columns if c not in ("Beta", "PrevCl")]
     strong = df.sort_values("Score", ascending=False).head(args.top)
