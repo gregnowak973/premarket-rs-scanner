@@ -25,7 +25,6 @@ TRADE_FROM = "09:35"          # first snapshot after the open; earlier ones are 
 DEFAULT_VIEW = core.DEFAULT_VIEW
 TREND_MIN = core.TREND_MIN
 TOP_N = core.TOP_N
-CARDS = 2                     # pick cards per side
 OUTCOME_SCALE = 3.0           # outcome bars span ±3%
 
 web = Flask(__name__)
@@ -118,7 +117,7 @@ def day_spreads(rows: pd.DataFrame) -> pd.DataFrame:
     for (day, hhmm), d in rows.dropna(subset=["fwd_rs"]).groupby(["day", "asof"]):
         top, bot = d.nlargest(TOP_N, "score"), d.nsmallest(TOP_N, "score")
         out.append({"day": day, "asof": hhmm, "top": top.fwd_rs.mean(), "bot": bot.fwd_rs.mean(),
-                    "spread": top.fwd_rs.mean() - bot.fwd_rs.mean(),
+                    "spread": top.fwd_rs.mean(),   # long side: did the strong names beat SPY?
                     "top_news": top[top.news_n > 0].fwd_rs.mean(), "n_news": int((top.news_n > 0).sum()),
                     "top_nonews": top[top.news_n == 0].fwd_rs.mean(), "n_nonews": int((top.news_n == 0).sum())})
     return pd.DataFrame(out)
@@ -387,7 +386,7 @@ kbd{font:11px ui-monospace,monospace;border:1px solid var(--line);border-radius:
     <p><b>Score</b> ranks the list: how far the stock is ahead of (or behind) what SPY's move implies, plus whether that gap is growing, scaled by the stock's normal volatility. ±1 is notable, ±3 strong.</p>
     <p><b>RS vs SPY</b>: move from yesterday's close beyond what SPY implies (beta-adjusted). <b>{{ trend }}m</b>: change in that over the last {{ trend }} minutes.</p>
     <p><b>Levels</b>: whether price has cleared the premarket (PM) or yesterday's (Y) high or low.</p>
-    <p><b>RS → close</b>: what happened after the snapshot, vs SPY. <b>✓ won</b> means it moved the trade's way (calls up vs SPY, puts down). Blue/orange always mean up/down vs SPY, not good/bad.</p>
+    <p><b>RS → close</b>: what happened after the snapshot, vs SPY. <b>✓ won</b> means it beat SPY. Blue/orange always mean up/down vs SPY, not good/bad.</p>
     <p><b>Premarket snapshots</b> (before 09:30) are context only. In the log they haven't predicted the day; 09:35 onward has. See Review.</p>
     <p class="mute">Keys: <kbd>←</kbd><kbd>→</kbd> day · <kbd>[</kbd><kbd>]</kbd> snapshot · <kbd>/</kbd> ticker · <kbd>t</kbd> today · <kbd>r</kbd> review · <kbd>Esc</kbd> close rows</p>
   </div></details>
@@ -521,7 +520,7 @@ def dot_plot(stats: pd.DataFrame) -> str:
            f'<line x1="{x(0):.1f}" x2="{x(0):.1f}" y1="{top - 10}" y2="{top + rh * len(stats) - 4}" stroke="var(--fg)" opacity=".45"/>']
     for tick in sorted({round(lo), 0, round(hi)} | {v for v in (-2, -1, 1, 2) if lo < v < hi}):
         out.append(f'<text x="{x(tick):.1f}" y="{H - 2}" text-anchor="middle" class="mute">{tick:+d}%</text>')
-    out.append(f'<text x="{x(0):.1f}" y="12" text-anchor="middle" class="mute">strong − weak, RS to close</text>')
+    out.append(f'<text x="{x(0):.1f}" y="12" text-anchor="middle" class="mute">strong 5 vs SPY, to close</text>')
     out.append(f'<text x="{W - R + 8}" y="12" class="mute">won</text>')
     for i, s in enumerate(stats.itertuples()):
         y = top + i * rh + 6
@@ -546,7 +545,8 @@ def heatmap(ds: pd.DataFrame, current: str) -> str:
     if ds.empty:
         return ""
     days = sorted(ds.day.unique())
-    cells = [f'<div class="heat" style="grid-template-columns:auto repeat({len(days)},minmax(8px,1fr))">']
+    gap = "2px" if len(days) <= 80 else "0"
+    cells = [f'<div class="heat" style="grid-template-columns:auto repeat({len(days)},minmax(0,1fr));column-gap:{gap}">']
     for s in SNAPSHOTS:
         g = ds[ds["asof"] == s].set_index("day")
         if g.empty:
@@ -559,11 +559,17 @@ def heatmap(ds: pd.DataFrame, current: str) -> str:
                 continue
             a = min(abs(v) / 2, 1) * 85 + 8
             color = f"color-mix(in srgb,var(--{'pos' if v > 0 else 'neg'}) {a:.0f}%,var(--card))"
-            ring = ";outline:2px solid var(--fg)" if s == current else ""
+            ring = ";box-shadow:inset 0 2px var(--fg),inset 0 -2px var(--fg)" if s == current else ""
             cells.append(f'<a href="/day/{d}?t={s}" style="background:{color}{ring}" '
                          f'title="{short_day(d)} {s}: {v:+.2f}%"></a>')
+    # x-axis: day numbers when few days, otherwise the first day of each month
+    def lab(i, d):
+        if len(days) <= 40:
+            return f"{dt.date.fromisoformat(d):%-d}"
+        return f"{dt.date.fromisoformat(d):%b}" if i == 0 or d[:7] != days[i - 1][:7] else ""
     cells.append('<span></span>' + "".join(
-        f'<span class="mute" style="font-size:10px;text-align:center">{dt.date.fromisoformat(d):%-d}</span>' for d in days))
+        f'<span class="mute" style="font-size:10px;white-space:nowrap;overflow:visible">{lab(i, d)}</span>'
+        for i, d in enumerate(days)))
     cells.append("</div>")
     return "".join(cells)
 
@@ -577,7 +583,7 @@ def verdict(stats: pd.DataFrame, n_days: int) -> str:
     p_rng = f"{pre.hits.min()}–{pre.hits.max()} of {pre.days.max()}" if not pre.empty else "n/a"
     head = ("Act from 09:35, not premarket." if not clear.empty and (pre.spread - 2 * pre.se).max() <= 0
             else "No snapshot time clearly works yet." if clear.empty else "Several snapshot times look positive.")
-    return (f'<div class="card verdict"><b>{head}</b><br>Strong names beat weak ones on {t_bits}; '
+    return (f'<div class="card verdict"><b>{head}</b><br>The strong names beat SPY on {t_bits}; '
             f"premarket snapshots {p_rng}. Each line is the likely range for that time (±2 standard errors, "
             f"{n_days} days); blue dots are the times whose whole range is above zero. "
             f"Clear so far: {', '.join(clear['asof']) or 'none'}.</div>")
@@ -639,31 +645,28 @@ def playbook_scorecard() -> str:
 
 
 def picks_did(t: str) -> str:
-    """Plain price moves after the snapshot for the top 2 calls and puts, vs any stock on the list."""
-    r = query("SELECT day, score, fwd_1h, fwd_close, fwd_hi, fwd_lo FROM scans WHERE asof=? AND fwd_close IS NOT NULL", t)
+    """The strong names' own price moves after the snapshot (what an option rides on), vs any stock."""
+    r = query("SELECT day, score, fwd_rs, fwd_1h, fwd_close, fwd_hi FROM scans WHERE asof=? AND fwd_close IS NOT NULL", t)
     if r.empty:
         return ""
     by = list(r.groupby("day"))
-    calls = pd.concat([g.nlargest(2, "score") for _, g in by])
-    puts = pd.concat([g.nsmallest(2, "score") for _, g in by])
-    rows = [("Top 2 calls", calls, "call"), ("Top 2 puts", puts, "put"), ("Any stock (baseline)", r, "")]
-    h = ['<div class="card tbl" style="margin-top:8px"><table><tr><th class="l"></th><th>+1 hour</th><th>Close</th>'
-         '<th title="Largest move the trade\'s way after the snapshot, averaged">Best move</th>'
-         '<th title="Share of picks that moved at least 1% the trade\'s way at some point before the close">'
-         "Moved ≥1% their way</th><th>Ended their way</th></tr>"]
-    for label, g, side in rows:
-        if side == "put":
-            best, hit, end = g.fwd_lo.mean(), (g.fwd_lo <= -1).mean(), (g.fwd_close < 0).mean()
-        elif side == "call":
-            best, hit, end = g.fwd_hi.mean(), (g.fwd_hi >= 1).mean(), (g.fwd_close > 0).mean()
-        else:
-            best, hit, end = None, ((g.fwd_hi >= 1).mean() + (g.fwd_lo <= -1).mean()) / 2, 0.5
-        h.append(f'<tr class="{"" if side else "mute"}"><td class="l">{label}</td><td>{num(g.fwd_1h.mean())}</td>'
-                 f"<td>{num(g.fwd_close.mean())}</td><td>{num(best) if side else '–'}</td>"
-                 f"<td>{hit:.0%}</td><td>{end:.0%}</td></tr>")
-    h.append(f'</table></div><p class="legend">Plain price changes from the {t} price, averaged over '
-             f'{r.day.nunique()} days: what an option rides on. The baseline row is every stock on the list, '
-             "so the picks' edge is the difference.</p>")
+    rows = [("#1 strongest", pd.concat([g.nlargest(1, "score") for _, g in by])),
+            (f"Strong {TOP_N}", pd.concat([g.nlargest(TOP_N, "score") for _, g in by])),
+            ("Any stock (baseline)", r)]
+    h = ['<div class="card tbl" style="margin-top:8px"><table><tr><th class="l"></th>'
+         '<th title="Move to the close beyond what SPY implies">vs SPY</th><th>+1 hour</th><th>Close</th>'
+         '<th title="Share of days the stock closed above its snapshot price">Up at close</th>'
+         '<th title="Highest point after the snapshot, averaged">Best rise</th>'
+         '<th title="Share of days it rose at least 1% at some point (≈ +100% on an at-the-money 0DTE call)">Reached +1%</th>'
+         '<th title="≈ +200% on an at-the-money 0DTE call">Reached +2%</th></tr>']
+    for label, g in rows:
+        h.append(f'<tr class="{"mute" if label.startswith("Any") else ""}"><td class="l">{label}</td>'
+                 f"<td>{num(g.fwd_rs.mean())}</td><td>{num(g.fwd_1h.mean())}</td><td>{num(g.fwd_close.mean())}</td>"
+                 f"<td>{(g.fwd_close > 0).mean():.0%}</td><td>{num(g.fwd_hi.mean())}</td>"
+                 f"<td>{(g.fwd_hi >= 1).mean():.0%}</td><td>{(g.fwd_hi >= 2).mean():.0%}</td></tr>")
+    h.append(f'</table></div><p class="legend">The stocks\' own price changes from the {t} price, averaged over '
+             f"{r.day.nunique()} days. That's what an option's premium rides on; 'vs SPY' is the same move after taking "
+             "out what SPY's move implies. The baseline row is every stock on the list.</p>")
     return "".join(h)
 
 
@@ -681,8 +684,8 @@ def review():
     body = [f"<h1>Does the ranking work?</h1>{verdict(stats, n_days)}", playbook_scorecard(),
             f'<div class="card chart" style="margin-top:10px">{dot_plot(stats)}</div>',
             f"<h2>Every session, every snapshot</h2>"
-            f'<p class="legend">Each square is one day: <span class="pos">blue</span> = the top {TOP_N} beat the '
-            f'bottom {TOP_N} to the close, <span class="neg">orange</span> = the reverse, darker = bigger. '
+            f'<p class="legend">Each square is one day: <span class="pos">blue</span> = the top {TOP_N} beat SPY '
+            f'to the close, <span class="neg">orange</span> = they lagged it, darker = bigger. '
             f"Click a square to open that day.</p>"
             f'<div class="card" style="padding:12px">{heatmap(ds, t)}</div>']
 
@@ -690,26 +693,36 @@ def review():
 
     # Sessions list for one snapshot time
     view = rows[rows["asof"] == t]
+    own = query("SELECT day, ticker, fwd_close, fwd_hi FROM scans WHERE asof=?", t).set_index(["day", "ticker"])
     market = query("SELECT day, spy_gap FROM market WHERE asof=?", t).set_index("day")
     tabs = snapshot_pills(lambda s: f"/review?t={s}#sessions", list(stats["asof"]), t)
     body.append(f'<h2 id="sessions">Sessions at {t}</h2>{tabs}'
                 '<div class="card tbl" style="margin-top:8px"><table><tr><th class="l">Day</th>'
-                f'<th class="l" title="Top {TOP_N} minus bottom {TOP_N}, RS to the close">Strong − weak</th>'
-                "<th class='l'>Top 3 (calls) · Bottom 3 (puts)</th><th class='hide-sm'>SPY gap</th></tr>")
-    for day in sorted(view.day.unique(), reverse=True):
+                f'<th class="l" title="Average of the top {TOP_N}, move to the close beyond what SPY implies">Strong {TOP_N} vs SPY</th>'
+                "<th title='Strong 5, own price move to the close'>Close</th><th title='Strong 5, average best rise'>Best rise</th>"
+                "<th class='l'>Top 3 (own move to close)</th><th class='hide-sm'>SPY gap</th></tr>")
+    all_days_t = sorted(view.day.unique(), reverse=True)
+    for i, day in enumerate(all_days_t):
+        if i == 30:
+            body.append(f"</table></div><details><summary class='mute' style='cursor:pointer;margin:8px 0'>"
+                        f"Show all {len(all_days_t)} sessions</summary><div class='card tbl'><table>")
         d = view[view.day == day]
-        top, bot = d.nlargest(3, "score"), d.nsmallest(3, "score")
-        spread = d.nlargest(TOP_N, "score").fwd_rs.mean() - d.nsmallest(TOP_N, "score").fwd_rs.mean()
+        top = d.nlargest(3, "score")
+        spread = d.nlargest(TOP_N, "score").fwd_rs.mean()
         mark = lambda r, side: ('<span class="res win">✓</span>' if (r.fwd_rs > 0) == (side == "call") else
                                 '<span class="res loss">✗</span>') if pd.notna(r.fwd_rs) else ""
+        own_close = lambda tk: own.fwd_close.get((day, tk))
         names = lambda g, side: " ".join(f'<a href="/ticker/{r.ticker}?day={day}&t={t}">{r.ticker}</a>{mark(r, side)}'
+                                         f'<small class="mute"> {num(own_close(r.ticker), 1)}</small>'
                                          for r in g.itertuples())
+        s5 = own.loc[[(day, tk) for tk in d.nlargest(TOP_N, "score").ticker if (day, tk) in own.index]]
         body.append(f'<tr id="d-{day}" class="{"hl" if day == viewed else ""}">'
                     f'<td class="l"><a href="/day/{day}?t={t}">{short_day(day)}</a></td>'
                     f'<td class="l">{bar(spread, 3, "dir", 80)}{num(spread)}</td>'
-                    f'<td class="l">▲ {names(top, "call")}<br>▼ {names(bot, "put")}</td>'
+                    f"<td>{num(s5.fwd_close.mean())}</td><td>{num(s5.fwd_hi.mean())}</td>"
+                    f'<td class="l">{names(top, "call")}</td>'
                     f'<td class="hide-sm mute">{num(market.spy_gap.get(day))}</td></tr>')
-    body.append("</table></div>")
+    body.append("</table></div>" + ("</details>" if len(all_days_t) > 30 else ""))
 
     # Full numbers, including the news split, for the curious
     tr = "".join(
@@ -1032,14 +1045,14 @@ def day_view(day):
     rest = d.iloc[TOP_N:len(d) - TOP_N]
     news_for = lambda tk: news[news.ticker == tk] if not news.empty else news
     cards = []
-    for g, side in ((strong, "call"), (weak, "put")):
-        for r in g.head(CARDS).itertuples():
+    for g, side in ((strong, "call"),):   # long side only: weakness hasn't persisted out of sample
+        for r in g.head(3).itertuples():
             r = g.loc[r.Index]
             b = news_for(r.ticker)
             b = b[(b.ts >= prev_close(day)) & (b.ts <= et(day, t))] if not b.empty else b
             cards.append(pick_card(r, side, b, has_news(day, r.ticker), pers.get(f"{side}:{r.ticker}", ""), hindsight, t,
                                    spy_path))
-    body.append(f'<h2>{"Watch list (premarket)" if t < TRADE_FROM else "Top picks"}</h2><div class="picks">{"".join(cards)}</div>')
+    body.append(f'<h2>{"Watch list (premarket)" if t < TRADE_FROM else "Top picks · calls"}</h2><div class="picks">{"".join(cards)}</div>')
 
     body.append('<div class="chips" role="group" aria-label="Filter"><button aria-pressed="true" data-f="">All</button>'
                 '<button aria-pressed="false" data-f="news">Company news</button>'
@@ -1048,13 +1061,14 @@ def day_view(day):
                 + "</div>")
     legend = (f"<b>After {t}</b>: the stock's price path from its {t} price to the close (dashed line = SPY, dot = "
               "best point). +1 hour, Close and Best are plain price changes from that price, what an option "
-              "rides on. The last column says whether it also beat SPY (calls) or lagged it (puts)."
+              "rides on. The last column says whether it also beat SPY."
               if hindsight else "Bars show the score on one scale for both tables.")
     body.append(f'<p class="legend">{legend}</p>')
     args = dict(news=news, has_news=has_news, t=t, hindsight=hindsight, pers=pers, score_scale=scale,
                 spy_paths={(day, t): spy_path})
     body.append(f"<h2>Strongest {TOP_N} · calls</h2>{rank_table(strong, side='call', **args)}")
-    body.append(f"<h2>Weakest {TOP_N} · puts</h2>{rank_table(weak, side='put', **args)}")
+    body.append(f'<details class="rest"><summary>Weakest {TOP_N} (context only: out of sample, weak names '
+                f"didn't keep lagging SPY)</summary>{rank_table(weak, side='put', **args)}</details>")
     body.append(f'<details class="rest"><summary>The other {len(rest)} on the watchlist</summary>'
                 f"{rank_table(rest, side='', **args)}</details>")
 
