@@ -308,6 +308,14 @@ details.help .panel{position:absolute;right:0;top:32px;width:min(420px,90vw);bac
 .side.call{color:var(--pos);border-color:var(--pos)} .side.put{color:var(--neg);border-color:var(--neg)}
 .pick .kv{display:flex;gap:2px 14px;flex-wrap:wrap;font-size:13px} .pick .kv span b{font-size:15px}
 .pick .lv,.pick .hl{font-size:13px} .pick .hl{color:var(--mute)}
+.after{border-top:1px solid var(--line);margin-top:6px;padding-top:8px}
+.after-hd{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}
+.after svg{width:100%;height:auto;max-width:320px}
+.moves{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:4px 0}
+.moves span{display:flex;flex-direction:column;font-size:14px} .moves small{font-size:11px;color:var(--mute)}
+.moves b .n{font-size:15px} .vs{font-size:13px}
+svg.spark{vertical-align:middle;display:inline-block}
+th.hind,td.hind{border-left:2px solid var(--line)}
 .tag{font-size:12px;padding:1px 7px;border-radius:6px;background:var(--tint)}
 .tag.warn{background:color-mix(in srgb,var(--loss) 14%,transparent)}
 /* tables */
@@ -560,6 +568,35 @@ def verdict(stats: pd.DataFrame, n_days: int) -> str:
             f"Clear so far: {', '.join(clear['asof']) or 'none'}.</div>")
 
 
+def picks_did(t: str) -> str:
+    """Plain price moves after the snapshot for the top 2 calls and puts, vs any stock on the list."""
+    r = query("SELECT day, score, fwd_1h, fwd_close, fwd_hi, fwd_lo FROM scans WHERE asof=? AND fwd_close IS NOT NULL", t)
+    if r.empty:
+        return ""
+    by = list(r.groupby("day"))
+    calls = pd.concat([g.nlargest(2, "score") for _, g in by])
+    puts = pd.concat([g.nsmallest(2, "score") for _, g in by])
+    rows = [("Top 2 calls", calls, "call"), ("Top 2 puts", puts, "put"), ("Any stock (baseline)", r, "")]
+    h = ['<div class="card tbl" style="margin-top:8px"><table><tr><th class="l"></th><th>+1 hour</th><th>Close</th>'
+         '<th title="Largest move the trade\'s way after the snapshot, averaged">Best move</th>'
+         '<th title="Share of picks that moved at least 1% the trade\'s way at some point before the close">'
+         "Moved ≥1% their way</th><th>Ended their way</th></tr>"]
+    for label, g, side in rows:
+        if side == "put":
+            best, hit, end = g.fwd_lo.mean(), (g.fwd_lo <= -1).mean(), (g.fwd_close < 0).mean()
+        elif side == "call":
+            best, hit, end = g.fwd_hi.mean(), (g.fwd_hi >= 1).mean(), (g.fwd_close > 0).mean()
+        else:
+            best, hit, end = None, ((g.fwd_hi >= 1).mean() + (g.fwd_lo <= -1).mean()) / 2, 0.5
+        h.append(f'<tr class="{"" if side else "mute"}"><td class="l">{label}</td><td>{num(g.fwd_1h.mean())}</td>'
+                 f"<td>{num(g.fwd_close.mean())}</td><td>{num(best) if side else '–'}</td>"
+                 f"<td>{hit:.0%}</td><td>{end:.0%}</td></tr>")
+    h.append(f'</table></div><p class="legend">Plain price changes from the {t} price, averaged over '
+             f'{r.day.nunique()} days: what an option rides on. The baseline row is every stock on the list, '
+             "so the picks' edge is the difference.</p>")
+    return "".join(h)
+
+
 @web.route("/review")
 def review():
     t = request.args.get("t", DEFAULT_VIEW)
@@ -578,6 +615,8 @@ def review():
             f'bottom {TOP_N} to the close, <span class="neg">orange</span> = the reverse, darker = bigger. '
             f"Click a square to open that day.</p>"
             f'<div class="card" style="padding:12px">{heatmap(ds, t)}</div>']
+
+    body.append(f"<h2>What the picks did after {t}</h2>{picks_did(t)}")
 
     # Sessions list for one snapshot time
     view = rows[rows["asof"] == t]
@@ -639,7 +678,58 @@ def persistence(day: str, t: str) -> dict[str, str]:
     return out
 
 
-def pick_card(r, side: str, before: pd.DataFrame, has_news: bool, pers: str, hindsight: bool, t: str) -> str:
+def parse_path(s) -> list[float]:
+    return [float(v) for v in s.split(",")] if isinstance(s, str) and s else []
+
+
+def best_move(r, side: str) -> tuple[float, str]:
+    """The move a trade on this side could have caught: biggest rise for calls, biggest drop for puts."""
+    if side == "call":
+        return r.fwd_hi, r.get("fwd_hi_t") or ""
+    if side == "put":
+        return r.fwd_lo, r.get("fwd_lo_t") or ""
+    up = pd.notna(r.fwd_hi) and (pd.isna(r.fwd_lo) or abs(r.fwd_hi) >= abs(r.fwd_lo))
+    return (r.fwd_hi, r.get("fwd_hi_t") or "") if up else (r.fwd_lo, r.get("fwd_lo_t") or "")
+
+
+def sparkline(path: str, spy: str | None, side: str, start: str, w: int = 110, h: int = 26, big: bool = False) -> str:
+    """The stock's % move from the snapshot price to the close (5-minute steps), SPY faint behind it."""
+    pts, ref = parse_path(path), parse_path(spy)
+    if len(pts) < 2:
+        return '<span class="mute">–</span>'
+    # x runs from the snapshot (or the open) to 16:00 so paths from different snapshots line up
+    t0 = max(start, "09:30")
+    steps = max(1, (16 * 60 - (int(t0[:2]) * 60 + int(t0[3:]))) // 5)
+    m = max(1.0, *(abs(v) for v in pts + ref)) * 1.1
+    pad_t, pad_b = (4, 16) if big else (2, 2)
+    x = lambda i: 1 + i / steps * (w - 2)
+    y = lambda v: pad_t + (m - v) / (2 * m) * (h - pad_t - pad_b)
+    line = lambda vs: " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vs))
+    tone = "pos" if pts[-1] >= 0 else "neg"
+    bi = (max if side == "call" else min if side == "put" else (lambda r_, key: max(r_, key=lambda i: abs(pts[i]))))(
+        range(len(pts)), key=lambda i: pts[i])
+    out = [f'<svg class="spark" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" '
+           f'aria-label="Move after {start}: close {pts[-1]:+.2f}%, best {pts[bi]:+.2f}%">',
+           f'<line x1="0" x2="{w}" y1="{y(0):.1f}" y2="{y(0):.1f}" stroke="var(--line)" stroke-width="1"/>']
+    if ref:
+        out.append(f'<polyline points="{line(ref)}" fill="none" stroke="var(--mute)" stroke-width="1" '
+                   f'stroke-dasharray="2 2" opacity=".7"/>')
+    out.append(f'<polyline points="{line(pts)}" fill="none" stroke="var(--{tone})" stroke-width="{2 if big else 1.5}"/>')
+    out.append(f'<circle cx="{x(bi):.1f}" cy="{y(pts[bi]):.1f}" r="{3.5 if big else 2.5}" fill="var(--fg)"/>')
+    if big:
+        mins = int(t0[:2]) * 60 + int(t0[3:])
+        for label, at in (("+1h", 60), ("noon", 12 * 60 - mins)):
+            i = at // 5
+            if 0 < i < steps:
+                out.append(f'<line x1="{x(i):.1f}" x2="{x(i):.1f}" y1="{pad_t}" y2="{h - pad_b}" stroke="var(--line)"/>'
+                           f'<text x="{x(i):.1f}" y="{h - 3}" text-anchor="middle" class="mute" font-size="10">{label}</text>')
+        out.append(f'<text x="{w - 2}" y="{h - 3}" text-anchor="end" class="mute" font-size="10">close</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def pick_card(r, side: str, before: pd.DataFrame, has_news: bool, pers: str, hindsight: bool, t: str,
+              spy_path: str | None = None) -> str:
     arrow = "↑" if r.trend > 0 else "↓"
     company = before[before.company == 1] if not before.empty else before
     if not has_news:
@@ -657,8 +747,14 @@ def pick_card(r, side: str, before: pd.DataFrame, has_news: bool, pers: str, hin
         tag = f'<span class="tag warn">{"New" if pers.startswith("new") else "Unsteady"}: {pers}</span>'
     out = ""
     if hindsight and pd.notna(r.fwd_rs):
-        out = (f'<div class="kv">{result(r.fwd_rs, side)} <span>RS → close {num(r.fwd_rs)}</span>'
-               f'<span>+1h {num(r.fwd_1h)}</span><span>max up {num(r.fwd_hi)} / down {num(r.fwd_lo)}</span></div>')
+        best, when = best_move(r, side)
+        out = (f'<div class="after"><div class="after-hd">After {t} <span class="mute">from {r["last"]:.2f}</span></div>'
+               f'{sparkline(r.get("fwd_path"), spy_path, side, t, 280, 78, big=True)}'
+               f'<div class="moves"><span><small>+1 hour</small>{num(r.fwd_1h)}</span>'
+               f'<span><small>Noon</small>{num(r.fwd_noon)}</span><span><small>Close</small>{num(r.fwd_close)}</span>'
+               f'<span><small>Best</small><b>{num(best)}</b><small>{when}</small></span></div>'
+               f'<div class="vs">{"Beat" if side == "call" else "Lagged"} SPY? {result(r.fwd_rs, side)} '
+               f'<span class="mute">{r.fwd_rs:+.2f}% vs SPY to the close</span></div></div>')
     return (f'<div class="card pick"><div class="hd"><a class="tk" href="/ticker/{r.ticker}?day={r.day}&t={t}">'
             f'{r.ticker}</a><span class="side {side}">{side}</span>{tag}</div>'
             f'<div class="kv"><span>Score <b>{r.score:+.1f}</b></span><span>RS vs SPY <b>{r.rs:+.2f}%</b></span>'
@@ -667,14 +763,22 @@ def pick_card(r, side: str, before: pd.DataFrame, has_news: bool, pers: str, hin
 
 
 def rank_table(d: pd.DataFrame, news: pd.DataFrame, has_news, t: str, side: str, hindsight: bool,
-               pers: dict, score_scale: float, first: str = "ticker", viewed: str = "") -> str:
+               pers: dict, score_scale: float, first: str = "ticker", viewed: str = "",
+               spy_paths: dict | None = None) -> str:
+    spy_paths = spy_paths or {}
     head = [("l", "Ticker" if first == "ticker" else "Day", ""),
             ("l", "Score", "±1 notable, ±3 strong"),
             ("", "RS vs SPY", "Move from yesterday's close beyond what SPY's move implies"),
             ("", f"{TREND_MIN}m", f"Change in RS vs SPY over the last {TREND_MIN} minutes"),
             ("l", "Levels", "Cleared the premarket (PM) or yesterday's (Y) high/low; hover for prices")]
     if hindsight:
-        head += [("l", "RS → close", "After the snapshot, vs SPY; bar spans ±3%"), ("l", "", "")]
+        best_lab = {"call": "Best rise", "put": "Best drop"}.get(side, "Biggest move")
+        vs_lab = {"call": "Beat SPY?", "put": "Lagged SPY?"}.get(side, "vs SPY")
+        head += [("l hind", f"After {t}", "Price path from the snapshot price to the close; dashed = SPY; dot = best point"),
+                 ("", "+1 hour", "Price change from the snapshot price one hour later"),
+                 ("", "Close", "Price change from the snapshot price to the close"),
+                 ("", best_lab, "Largest move the trade's way after the snapshot, and when"),
+                 ("l", vs_lab, "Move to the close beyond what SPY's move implies (beta-adjusted)")]
     head += [("l", "", "")]
     news_ok = has_news if callable(has_news) else (lambda _day, _tk: has_news)
     h = ['<div class="card tbl"><table class="rank"><tr>' +
@@ -707,8 +811,12 @@ def rank_table(d: pd.DataFrame, news: pd.DataFrame, has_news, t: str, side: str,
                  f"<td>{num(r.rs)}</td><td>{num(r.trend)}</td>",
                  f'<td class="l">{level_chips(r)}</td>']
         if hindsight:
-            cells += [f'<td class="l">{bar(r.fwd_rs, OUTCOME_SCALE, "dir", 72)}{num(r.fwd_rs)}</td>',
-                      f'<td class="l">{result(r.fwd_rs, side)}</td>']
+            best, when = best_move(r, side)
+            vs = (f'{result(r.fwd_rs, side)} <span class="mute">{num(r.fwd_rs)}</span>' if side
+                  else num(r.fwd_rs))
+            cells += [f'<td class="l hind">{sparkline(r.get("fwd_path"), spy_paths.get((r.day, r["asof"])), side, r["asof"])}</td>',
+                      f"<td>{num(r.fwd_1h)}</td><td>{num(r.fwd_close)}</td>",
+                      f'<td>{num(best)}<small class="mute"> {when}</small></td>', f'<td class="l">{vs}</td>']
         cells.append(f'<td class="l"><button class="tog" aria-expanded="false" aria-controls="{rid}" '
                      f'data-key="{key}">Why{badge}</button></td>')
         facts = (f'<div class="facts"><span>Last <b>{r["last"]:.2f}</b></span><span>Gap {num(r.gap)}</span>'
@@ -764,7 +872,8 @@ def day_view(day):
     cov = news_coverage()
     has_news = lambda day_, tk: covered(cov, tk, day_)
     hindsight = not live and d.fwd_rs.notna().any()
-    m = query("SELECT spy_gap, spy_trend FROM market WHERE day=? AND asof=?", day, t)
+    m = query("SELECT spy_gap, spy_trend, spy_path FROM market WHERE day=? AND asof=?", day, t)
+    spy_path = m.spy_path[0] if not m.empty else None
     pers = persistence(day, t)
     scale = max(3.0, d.score.abs().max())
 
@@ -804,7 +913,8 @@ def day_view(day):
             r = g.loc[r.Index]
             b = news_for(r.ticker)
             b = b[(b.ts >= prev_close(day)) & (b.ts <= et(day, t))] if not b.empty else b
-            cards.append(pick_card(r, side, b, has_news(day, r.ticker), pers.get(f"{side}:{r.ticker}", ""), hindsight, t))
+            cards.append(pick_card(r, side, b, has_news(day, r.ticker), pers.get(f"{side}:{r.ticker}", ""), hindsight, t,
+                                   spy_path))
     body.append(f'<h2>{"Watch list (premarket)" if t < TRADE_FROM else "Top picks"}</h2><div class="picks">{"".join(cards)}</div>')
 
     body.append('<div class="chips" role="group" aria-label="Filter"><button aria-pressed="true" data-f="">All</button>'
@@ -812,10 +922,13 @@ def day_view(day):
                 '<button aria-pressed="false" data-f="clean">Cleared a level</button>'
                 + ('<button aria-pressed="false" data-f="held">Held since 09:35</button>' if t > TRADE_FROM else "")
                 + "</div>")
-    legend = ("Bars: score (grey, same scale in both tables) and RS → close (blue up / orange down vs SPY, ±3%). "
-              "✓ = moved the trade's way." if hindsight else "Bars show the score on one scale for both tables.")
+    legend = (f"<b>After {t}</b>: the stock's price path from its {t} price to the close (dashed line = SPY, dot = "
+              "best point). +1 hour, Close and Best are plain price changes from that price, what an option "
+              "rides on. The last column says whether it also beat SPY (calls) or lagged it (puts)."
+              if hindsight else "Bars show the score on one scale for both tables.")
     body.append(f'<p class="legend">{legend}</p>')
-    args = dict(news=news, has_news=has_news, t=t, hindsight=hindsight, pers=pers, score_scale=scale)
+    args = dict(news=news, has_news=has_news, t=t, hindsight=hindsight, pers=pers, score_scale=scale,
+                spy_paths={(day, t): spy_path})
     body.append(f"<h2>Strongest {TOP_N} · calls</h2>{rank_table(strong, side='call', **args)}")
     body.append(f"<h2>Weakest {TOP_N} · puts</h2>{rank_table(weak, side='put', **args)}")
     body.append(f'<details class="rest"><summary>The other {len(rest)} on the watchlist</summary>'
@@ -894,6 +1007,8 @@ def ticker_view(ticker):
     crumb = (f'<p class="mute"><a href="/day/{viewed}?t={t}#{ticker}">‹ {short_day(viewed)} at {t}</a></p>'
              if viewed else "")
     scale = max(3.0, d.score.abs().max())
+    mk = query("SELECT day, spy_path FROM market WHERE asof=?", t)
+    spy_paths = {(dd, t): sp for dd, sp in zip(mk.day, mk.spy_path)}
     rows_html = []
     for side in ("call", "put", ""):
         g = d[d.side == side]
@@ -902,7 +1017,8 @@ def ticker_view(ticker):
         title = {"call": f"Days in the top {TOP_N}", "put": f"Days in the bottom {TOP_N}", "": "Other days"}[side]
         has_news = lambda day_, tk: covered(cov, tk, day_)
         rows_html.append(f"<h2>{title}</h2>" + rank_table(
-            g, news, has_news, t, side, g.fwd_rs.notna().any(), {}, scale, first="day", viewed=viewed))
+            g, news, has_news, t, side, g.fwd_rs.notna().any(), {}, scale, first="day", viewed=viewed,
+            spy_paths=spy_paths))
     body = (f"{crumb}<h1>{ticker}</h1>{summary}"
             f'<div class="card chart">{scatter(d, viewed)}</div>'
             + "".join(rows_html))

@@ -160,6 +160,23 @@ def last_at(series: pd.Series, t: dt.datetime) -> float:
     return float(s.iloc[-1]) if not s.empty else np.nan
 
 
+PATH_STEP = dt.timedelta(minutes=5)
+
+
+def price_path(closes: pd.Series, start: float, asof: dt.datetime, day: dt.date) -> str:
+    """% change from `start` every 5 minutes from `asof` (or the open, if later) to the close,
+    as compact comma-separated text for a sparkline."""
+    t = max(asof, dt.datetime.combine(day, dt.time(9, 30), tzinfo=NY))
+    end = dt.datetime.combine(day, dt.time(15, 59), tzinfo=NY)
+    pts = [0.0] if t == asof else []
+    while t <= end:
+        t += PATH_STEP
+        px = last_at(closes, min(t, end))
+        if not np.isnan(px):
+            pts.append((px / start - 1) * 100)
+    return ",".join(f"{v:.2f}" for v in pts)
+
+
 def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
          intraday: dict, daily: dict, with_news: bool) -> pd.DataFrame:
     spy_prev, spy_day = split_day(intraday[BENCH], day)
@@ -235,6 +252,9 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
                 if asof < t <= closes.index[-1]:
                     row[col] = (last_at(closes, t) / now - 1) * 100
             row["FwdClose%"] = fwd
+            row["FwdHiT"] = after["High"].idxmax().strftime("%H:%M")
+            row["FwdLoT"] = after["Low"].idxmin().strftime("%H:%M")
+            row["FwdPath"] = price_path(closes, now, asof, day)
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("Ticker")
@@ -248,7 +268,9 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
             if heads:
                 df.loc[t, "News"] = heads[0]
                 df.loc[t, "NewsN"] = named
-    df.attrs.update(spy_gap=spy_gap, spy_trend=spy_gap - spy_gap_then)
+    spy_path = (price_path(spy_day["Close"].dropna(), spy_now, asof, day)
+                if not spy_after.between_time("09:30", "15:59").empty else None)
+    df.attrs.update(spy_gap=spy_gap, spy_trend=spy_gap - spy_gap_then, spy_path=spy_path)
     return df
 
 

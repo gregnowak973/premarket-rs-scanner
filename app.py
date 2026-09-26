@@ -10,6 +10,7 @@ Records the RS scanner every trading morning and serves the history on a local w
     python app.py schedule     # run `record` every 5 minutes in the background (macOS, Windows, Linux)
     python app.py unschedule   # remove that background job
     python app.py status       # is the website up? recent log lines, for troubleshooting
+    python app.py refresh      # fill in newly added outcome details for days already recorded
 
 While the site is running it takes a snapshot at each time in SNAPSHOTS on weekdays,
 with headlines, and after 16:05 ET fills in what each stock did for the rest of the day.
@@ -75,9 +76,11 @@ COLS = {
     "PrevHi": "prev_hi", "PrevLo": "prev_lo", "PrevCl": "prev_cl", "Score": "score",
     "Div": "div", "FwdRS%": "fwd_rs", "FwdHi%": "fwd_hi", "FwdLo%": "fwd_lo",
     "Fwd1h%": "fwd_1h", "FwdNoon%": "fwd_noon", "FwdClose%": "fwd_close",
+    "FwdHiT": "fwd_hi_t", "FwdLoT": "fwd_lo_t", "FwdPath": "fwd_path",
     "News": "news", "NewsN": "news_n",
 }
-FWD = ["fwd_rs", "fwd_hi", "fwd_lo", "fwd_1h", "fwd_noon", "fwd_close"]
+FWD = ["fwd_rs", "fwd_hi", "fwd_lo", "fwd_1h", "fwd_noon", "fwd_close", "fwd_hi_t", "fwd_lo_t", "fwd_path"]
+TEXT = {"div", "news", "fwd_hi_t", "fwd_lo_t", "fwd_path"}
 lock = threading.Lock()
 
 
@@ -86,23 +89,25 @@ lock = threading.Lock()
 def db() -> sqlite3.Connection:
     DB.parent.mkdir(exist_ok=True)
     con = sqlite3.connect(DB)
-    cols = ", ".join(f"{c} {'TEXT' if c in ('div', 'news') else 'REAL'}" for c in COLS.values())
+    cols = ", ".join(f"{c} {'TEXT' if c in TEXT else 'REAL'}" for c in COLS.values())
     con.executescript(f"""
         CREATE TABLE IF NOT EXISTS scans (
             day TEXT, asof TEXT, ticker TEXT, source TEXT, {cols},
             PRIMARY KEY (day, asof, ticker));
         CREATE TABLE IF NOT EXISTS market (
-            day TEXT, asof TEXT, spy_gap REAL, spy_trend REAL, PRIMARY KEY (day, asof));
+            day TEXT, asof TEXT, spy_gap REAL, spy_trend REAL, spy_path TEXT, PRIMARY KEY (day, asof));
         CREATE TABLE IF NOT EXISTS done (day TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS news (
             ticker TEXT, ts TEXT, title TEXT, link TEXT, publisher TEXT, company INTEGER,
             PRIMARY KEY (ticker, title));
     """)
+    if "spy_path" not in {r[1] for r in con.execute("PRAGMA table_info(market)")}:
+        con.execute("ALTER TABLE market ADD COLUMN spy_path TEXT")
     have = {r[1] for r in con.execute("PRAGMA table_info(scans)")}
     added = [c for c in COLS.values() if c not in have]
     for c in added:
-        con.execute(f"ALTER TABLE scans ADD COLUMN {c} {'TEXT' if c in ('div', 'news') else 'REAL'}")
+        con.execute(f"ALTER TABLE scans ADD COLUMN {c} {'TEXT' if c in TEXT else 'REAL'}")
     if added:  # new outcome columns: recompute outcomes for every day still in Yahoo's history
         con.execute("DELETE FROM done")
         con.execute("DELETE FROM state WHERE key='catch_up'")
@@ -121,8 +126,10 @@ def save(con, day: dt.date, hhmm: str, df: pd.DataFrame, source: str) -> None:
         vals = [None if pd.isna(r.get(k)) else (r.get(k) if isinstance(r.get(k), str) else float(r.get(k)))
                 for k in COLS]
         con.execute(sql, [day.isoformat(), hhmm, t, source] + vals)
-    con.execute("INSERT OR REPLACE INTO market VALUES (?, ?, ?, ?)",
-                (day.isoformat(), hhmm, df.attrs["spy_gap"], df.attrs["spy_trend"]))
+    con.execute("INSERT INTO market (day, asof, spy_gap, spy_trend, spy_path) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(day, asof) DO UPDATE SET spy_path=excluded.spy_path"
+                + ("" if source.startswith("replay") else ", spy_gap=excluded.spy_gap, spy_trend=excluded.spy_trend"),
+                (day.isoformat(), hhmm, df.attrs["spy_gap"], df.attrs["spy_trend"], df.attrs.get("spy_path")))
     con.commit()
 
 
@@ -285,6 +292,42 @@ def backfill_alpaca(months: int = 12) -> None:
         end = start - dt.timedelta(days=1)
 
 
+def refresh_outcomes() -> None:
+    """Recompute outcome columns (e.g. new ones like the price path) for recorded days that lack
+    them, from whichever source still has those days: Yahoo 1-minute, Yahoo 5-minute, or Alpaca."""
+    with db() as con:
+        need = con.execute("SELECT day, MAX(source) FROM scans WHERE asof=? AND fwd_rs IS NOT NULL "
+                           "AND fwd_path IS NULL GROUP BY day", (DEFAULT_VIEW,)).fetchall()
+    if not need:
+        return
+    today = dt.datetime.now(rs.NY).date()
+    one_min = today - dt.timedelta(days=29)
+    days = {s: sorted(dt.date.fromisoformat(d) for d, src in need if src == s) for _, s in need}
+    recent = sorted(dt.date.fromisoformat(d) for d, src in need if src not in ("replay-5m", "replay-alpaca")
+                    and dt.date.fromisoformat(d) >= one_min)
+    print(f"Adding new outcome details to {len(need)} session(s)...")
+    if recent:
+        intraday, daily = load_market(max(one_min, recent[0] - dt.timedelta(days=5)))
+        record_outcomes(recent, intraday, daily)
+    if days.get("replay-5m"):
+        tickers = sorted(set(load_tickers()) | {rs.BENCH})
+        record_outcomes(days["replay-5m"], rs.fetch_intraday(tickers, interval="5m"),
+                        rs.fetch_daily(tickers), source="replay-5m")
+    if days.get("replay-alpaca"):
+        import alpaca_data
+        if not alpaca_data.credentials():
+            print("Skipping Alpaca days: no keys in .env")
+            return
+        tickers = sorted(set(load_tickers()) | {rs.BENCH})
+        daily = rs.fetch_daily(tickers, period="2y")
+        todo = days["replay-alpaca"]
+        while todo:
+            chunk = [d for d in todo if d <= todo[0] + dt.timedelta(days=30)]
+            bars = alpaca_data.fetch_bars(tickers, chunk[0] - dt.timedelta(days=7), chunk[-1])
+            record_outcomes(chunk, bars, daily, source="replay-alpaca")
+            todo = todo[len(chunk):]
+
+
 def record_due(now: dt.datetime, taken: set) -> None:
     """Take any snapshot due in the last 10 minutes, then catch up on finished sessions."""
     if now.weekday() < 5:
@@ -330,6 +373,8 @@ def main() -> None:
                 record_due(dt.datetime.now(rs.NY), set())
             except Exception:
                 traceback.print_exc()
+    elif cmd == "refresh":
+        refresh_outcomes()
     elif cmd in ("schedule", "unschedule", "status"):
         import scheduling
         {"schedule": scheduling.install, "unschedule": scheduling.remove, "status": scheduling.status}[cmd]()

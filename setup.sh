@@ -12,4 +12,5 @@ echo "Installing libraries ..."
 .venv/bin/python -m pip install --quiet --no-cache-dir -r requirements.txt
 echo "Loading the last ~60 days (a few minutes the first time) ..."
 .venv/bin/python app.py backfill --deep
+.venv/bin/python app.py refresh
 .venv/bin/python app.py schedule
