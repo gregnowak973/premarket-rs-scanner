@@ -823,6 +823,7 @@ def day_view(day):
 
     src = ("recorded live" if (d.source == "live").any() else
            "rebuilt from 5-minute history (a little coarser than 1-minute days)" if (d.source == "replay-5m").any()
+           else "rebuilt from Alpaca 1-minute history" if (d.source == "replay-alpaca").any()
            else "rebuilt from 1-minute history")
     return page(f"{short_day(day)} {t} · RS Scanner", "".join(body), page="today" if day == now_ny().date().isoformat() else "day",
                 pills=snapshot_pills(href, times, t), stepper=stepper, footer=f"This day was {src}",

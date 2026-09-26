@@ -5,6 +5,7 @@ Records the RS scanner every trading morning and serves the history on a local w
     python app.py              # website at http://127.0.0.1:8050, records scans while it runs
     python app.py backfill     # load the last ~30 trading days from Yahoo (run once)
     python app.py backfill --deep   # also rebuild older days (~60 total) from 5-minute bars
+    python app.py backfill --alpaca 12   # a year further back from Alpaca (free keys in .env)
     python app.py record       # record whatever is due right now, catch up missed days, then exit
     python app.py schedule     # run `record` every 5 minutes in the background (macOS, Windows, Linux)
     python app.py unschedule   # remove that background job
@@ -256,6 +257,34 @@ def backfill_deep() -> None:
     record_outcomes(days, intraday, daily, source="replay-5m")
 
 
+def backfill_alpaca(months: int = 12) -> None:
+    """Sessions older than what's recorded, from Alpaca's 1-minute bars, a month at a time.
+
+    Uses today's watchlist for every past day, so a stock that listed or fell off the
+    list since then is judged as if you'd been watching it (survivorship).
+    """
+    import alpaca_data
+    tickers = sorted(set(load_tickers()) | {rs.BENCH})
+    today = dt.datetime.now(rs.NY).date()
+    oldest = today - dt.timedelta(days=int(months * 30.5))
+    with db() as con:
+        have = {r[0] for r in con.execute("SELECT DISTINCT day FROM scans")}
+    end = (dt.date.fromisoformat(min(have)) - dt.timedelta(days=1)) if have else today
+    print("Daily history for betas...")
+    daily = rs.fetch_daily(tickers, period="2y" if months <= 12 else "5y")
+    while end > oldest:
+        start = max(oldest, end - dt.timedelta(days=30))
+        print(f"Alpaca 1-minute bars {start} → {end} ...", flush=True)
+        # a week of extra history so the first day has a previous session
+        bars = alpaca_data.fetch_bars(tickers, start - dt.timedelta(days=7), end)
+        if rs.BENCH not in bars:
+            print("No SPY bars returned; stopping.")
+            break
+        days = [d for d in trading_days(bars) if start <= d <= end and d.isoformat() not in have]
+        record_outcomes(days, bars, daily, source="replay-alpaca")
+        end = start - dt.timedelta(days=1)
+
+
 def record_due(now: dt.datetime, taken: set) -> None:
     """Take any snapshot due in the last 10 minutes, then catch up on finished sessions."""
     if now.weekday() < 5:
@@ -289,6 +318,10 @@ def main() -> None:
         catch_up(dt.datetime.now(rs.NY), force=True)
         if "--deep" in sys.argv:
             backfill_deep()
+        if "--alpaca" in sys.argv:
+            i = sys.argv.index("--alpaca")
+            months = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else 12
+            backfill_alpaca(months)
     elif cmd == "record":
         DB.parent.mkdir(exist_ok=True)
         with open(DB.with_name("record.log"), "a") as log:  # scheduled runs have no console

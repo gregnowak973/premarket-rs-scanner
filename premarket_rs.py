@@ -77,8 +77,8 @@ def fetch_intraday(tickers: list[str], start: dt.date | None = None,
     return _split(df, tickers)
 
 
-def fetch_daily(tickers: list[str]) -> dict[str, pd.DataFrame]:
-    df = yf.download(tickers, period="1y", interval="1d", progress=False,
+def fetch_daily(tickers: list[str], period: str = "1y") -> dict[str, pd.DataFrame]:
+    df = yf.download(tickers, period=period, interval="1d", progress=False,
                      group_by="ticker", threads=True, auto_adjust=False)
     return _split(df, tickers)
 

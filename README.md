@@ -30,6 +30,17 @@ On Windows, run the same steps by hand: `py -m venv .venv`, `.venv\Scripts\pytho
 
 `python app.py unschedule` removes both jobs. Logs are in `data/record.log` and `data/site.log`. On macOS, keep the folder outside Documents/Desktop/Downloads, or allow Python access when macOS asks; otherwise the background job can't read it.
 
+### Going back further with Alpaca (free)
+
+Yahoo stops at ~60 days. For a year or more of 1-minute history, make a free account at alpaca.markets, generate API keys, and put them in a file named `.env` in this folder (git ignores it; never commit or share it):
+
+```
+ALPACA_KEY_ID=PK...
+ALPACA_SECRET_KEY=...
+```
+
+Then run `.venv/bin/python app.py backfill --alpaca 12` (months; about 2–3 minutes per month). It fills sessions older than what's already recorded, using today's watchlist for every past day (so stocks that listed or dropped off since then are treated as if you'd watched them). The review page includes them automatically.
+
 ### If the website won't load
 
 Run `.venv/bin/python app.py status`. It shows whether the site is up, whether the background jobs are installed, and the latest log lines. Common causes on a Mac:
