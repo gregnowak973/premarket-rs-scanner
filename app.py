@@ -277,6 +277,7 @@ def snapshot_stats(rows: pd.DataFrame) -> pd.DataFrame:
         s = pd.DataFrame(days)
         out.append({"asof": hhmm, "days": len(s), "top": s.top.mean(), "bot": s.bot.mean(),
                     "spread": (s.top - s.bot).mean(), "hit": ((s.top - s.bot) > 0).mean() * 100,
+                    "hits": int(((s.top - s.bot) > 0).sum()),
                     "top_news": s.top_news.mean(), "top_nonews": s.top_nonews.mean()})
     return pd.DataFrame(out)
 
@@ -288,20 +289,36 @@ BASE = """<!doctype html><html><head><meta charset="utf-8">
 :root{--bg:#f7f7f5;--card:#fff;--fg:#1d1d1f;--mute:#6e6e73;--line:#e3e3e0;--up:#0a7d3b;--dn:#c0392b;--acc:#2f5bd3}
 @media (prefers-color-scheme:dark){:root{--bg:#141416;--card:#1d1d20;--fg:#ececef;--mute:#9a9aa1;--line:#2e2e33;--up:#3ecf7a;--dn:#ff6b5e;--acc:#7c9cff}}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}
-main{max-width:1200px;margin:0 auto;padding:20px 16px 60px}
+main{max-width:1440px;margin:0 auto;padding:20px 16px 60px}
 a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
 h1{font-size:22px;margin:0 0 4px} h2{font-size:16px;margin:28px 0 8px} .mute{color:var(--mute)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:4px 0;overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th,td{padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
+th,td{padding:6px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
 th{font-weight:600;color:var(--mute);font-size:12px} tr:last-child td{border-bottom:0}
 td.l,th.l{text-align:left} td.news{white-space:normal;min-width:260px;text-align:left;color:var(--mute)}
-.tog{font:inherit;color:var(--acc);background:none;border:1px solid var(--line);border-radius:6px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.tog{min-width:64px;font:inherit;color:var(--acc);background:none;border:1px solid var(--line);border-radius:6px;padding:2px 8px;cursor:pointer;white-space:nowrap}
 .tog[aria-expanded="true"]{background:var(--acc);color:#fff;border-color:var(--acc)}
 tr.detail td{text-align:left;white-space:normal;background:var(--bg);padding:10px 14px 14px}
 tr.detail p{margin:0 0 10px;max-width:900px} tr.detail ul{margin:4px 0 0;padding-left:18px} tr.detail li{margin:3px 0}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:8px 28px}
 .up{color:var(--up)} .dn{color:var(--dn)}
+.pick td:first-child,.pick th:first-child{position:sticky;left:0;background:var(--card);z-index:1}
+tr.detail td>*{position:sticky;left:14px;max-width:min(1100px,calc(100vw - 70px))}
+tr.grp th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;text-align:left;border-bottom:0;padding-bottom:0}
+.hind{border-left:2px solid var(--line)} td.hind~td:not(:last-child),td.hind{background:color-mix(in srgb,var(--bg) 55%,transparent)}
+.win{font-weight:600;background:color-mix(in srgb,var(--up) 14%,transparent)!important;border-radius:4px}
+.lvl{display:inline-block;font-size:12px;padding:1px 6px;margin-left:3px;border-radius:999px;border:1px solid var(--line);color:var(--mute)}
+.lvl.up{border-color:color-mix(in srgb,var(--up) 45%,transparent);color:var(--up)}
+.lvl.dn{border-color:color-mix(in srgb,var(--dn) 45%,transparent);color:var(--dn)}
+.badge{display:inline-block;min-width:18px;margin-left:4px;padding:0 5px;border-radius:999px;background:var(--line);color:var(--fg);font-size:12px}
+.tog[aria-expanded="true"] .badge{background:#fff3;color:#fff}
+.best td{font-weight:600}
+details.rest>summary{cursor:pointer;color:var(--acc);margin:28px 0 8px;font-weight:600;font-size:16px}
+details.rest td{opacity:.8}
+details.how{margin:4px 0 0} details.how summary{cursor:pointer;color:var(--acc)} details.how p{margin:6px 0;max-width:900px}
+@media(max-width:640px){.hide-sm,tr.grp{display:none} h1{font-size:20px} main{padding:16px 10px 48px}
+ th{white-space:normal;vertical-align:bottom} th,td{padding:6px 5px} .tog{min-width:0;padding:2px 6px}}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0} .tabs a{padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--card)}
 .tabs a.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 nav{margin-bottom:16px}
@@ -321,6 +338,7 @@ document.addEventListener("click", e => {
 def pct(v, digits=2, unit=""):
     if v is None or pd.isna(v):
         return '<span class="mute">–</span>'
+    v = round(float(v), digits) + 0.0  # no red "-0.00"
     return f'<span class="{"up" if v > 0 else "dn" if v < 0 else ""}">{v:+.{digits}f}{unit}</span>'
 
 
@@ -344,19 +362,27 @@ def home():
     h = ["<h1>Premarket RS scanner log</h1>",
          f'<p class="mute">{rows.day.nunique()} sessions recorded. For each snapshot time: how the '
          f"top {TOP_N} and bottom {TOP_N} by score did from then to the close, vs SPY (beta-adjusted).</p>",
-         '<h2>Does the ranking work?</h2><div class="card"><table><tr><th class="l">Snapshot</th><th>Days</th>'
-         f"<th>Top {TOP_N}</th><th>Bottom {TOP_N}</th><th>Spread</th><th>Days spread &gt; 0</th>"
-         "<th>Top with company news</th><th>Top without news</th></tr>"]
+         '<h2>Does the ranking work?</h2><div class="card"><table><tr><th class="l">Snapshot</th>'
+         f'<th title="Top {TOP_N} minus bottom {TOP_N}, RS to the close, averaged over days">Spread</th>'
+         "<th>Days spread &gt; 0</th>"
+         f"<th>Top {TOP_N}</th><th>Bottom {TOP_N}</th><th class='hide-sm'>Top with company news</th>"
+         "<th class='hide-sm'>Top without news</th><th class='hide-sm'>Days</th></tr>"]
+    best = stats.sort_values(["spread", "hit"], ascending=False)["asof"].iloc[0] if not stats.empty else None
+    mute = lambda v: f'<span class="mute">{v:+.2f}%</span>' if pd.notna(v) else pp(v)
     for _, s in stats.iterrows():
-        h.append(f'<tr><td class="l">{s["asof"]}</td><td>{s.days}</td><td>{pp(s.top)}</td><td>{pp(s.bot)}</td>'
-                 f"<td>{pp(s.spread)}</td><td>{s.hit:.0f}%</td><td>{pp(s.top_news)}</td><td>{pp(s.top_nonews)}</td></tr>")
-    h.append('</table></div><p class="mute">Spread above zero means the strong names beat the weak ones. '
-             "News columns only cover snapshots recorded live, since Yahoo drops old headlines.</p>")
+        h.append(f'<tr class="{"best" if s["asof"] == best else ""}"><td class="l">{s["asof"]}</td>'
+                 f"<td>{pp(s.spread)}</td><td>{s.hits}/{s.days} ({s.hit:.0f}%)</td><td>{mute(s.top)}</td>"
+                 f"<td>{mute(s.bot)}</td><td class='hide-sm'>{pp(s.top_news)}</td>"
+                 f"<td class='hide-sm'>{pp(s.top_nonews)}</td><td class='hide-sm'>{s.days}</td></tr>")
+    h.append(f'</table></div><p class="mute">Spread above zero means the strong names beat the weak ones '
+             f"(RS vs SPY from the snapshot to the close). With {rows.day.nunique()} days, differences under "
+             "about 0.3% are noise. News columns only cover days with saved headlines.</p>")
 
     view = rows[rows["asof"] == DEFAULT_VIEW]
     market = query("SELECT day, spy_gap FROM market WHERE asof=?", DEFAULT_VIEW).set_index("day")
     h.append(f'<h2>Sessions (ranking at {DEFAULT_VIEW})</h2><div class="card"><table><tr><th class="l">Day</th>'
-             "<th>SPY</th><th class='l'>Strongest</th><th class='l'>Weakest</th><th>Spread</th></tr>")
+             f"<th>SPY gap @{DEFAULT_VIEW}</th><th class='l'>Top 3</th><th class='l'>Bottom 3</th>"
+             f"<th>Spread (top {TOP_N} − bottom {TOP_N})</th></tr>")
     for day in sorted(rows.day.unique(), reverse=True):
         d = view[view.day == day]
         top, bot = d.nlargest(3, "score"), d.nsmallest(3, "score")
@@ -434,6 +460,18 @@ def why(r, before: pd.DataFrame) -> str:
     return " ".join(bits)
 
 
+def level_chips(r) -> str:
+    """Where the price sits against the levels a 0DTE entry is judged by."""
+    chips = []
+    if pd.notna(r.pm_hi) and r["last"] > r.pm_hi: chips.append(("up", "▲ PM hi"))
+    if pd.notna(r.pm_lo) and r["last"] < r.pm_lo: chips.append(("dn", "▼ PM lo"))
+    if r["last"] > r.prev_hi: chips.append(("up", "▲ Y hi"))
+    if r["last"] < r.prev_lo: chips.append(("dn", "▼ Y lo"))
+    tip = f"Premarket {r.pm_hi:.2f} / {r.pm_lo:.2f} · Yesterday {r.prev_hi:.2f} / {r.prev_lo:.2f}"
+    body = "".join(f'<span class="lvl {c}">{t}</span>' for c, t in chips) or '<span class="lvl">inside</span>'
+    return f'<span title="{tip}">{body}</span>'
+
+
 def headline_list(n: pd.DataFrame, limit: int = 12) -> str:
     if n.empty:
         return '<p class="mute">None saved.</p>'
@@ -448,12 +486,29 @@ def headline_list(n: pd.DataFrame, limit: int = 12) -> str:
     return f"<ul>{''.join(items)}{more}</ul>"
 
 
-def ranking_table(d: pd.DataFrame, news: pd.DataFrame, first_col: str = "ticker") -> str:
-    h = ['<div class="card"><table><tr>'
-         f'<th class="l">{"Ticker" if first_col == "ticker" else "Day"}</th><th>Last</th><th>Gap%</th><th>RS%</th>'
-         "<th>Trend%</th><th>Score</th><th>PM hi / lo</th><th>Prev hi / lo</th>"
-         "<th>+1 hour</th><th>Noon</th><th>Close</th><th>vs SPY to close</th>"
-         "<th>Best</th><th>Worst</th><th class='l'>Why / news</th></tr>"]
+def ranking_table(d: pd.DataFrame, news: pd.DataFrame, first_col: str = "ticker", side: str = "") -> str:
+    """side: "call" or "put" marks the RS-after cell when the stock moved the trade's way."""
+    t = d["asof"].iloc[0] if not d.empty else ""
+    head = [
+        ("l", "Ticker" if first_col == "ticker" else "Day", ""),
+        ("", "Score", "Combined z-score of RS and trend. ±1 is notable, ±3 is strong"),
+        ("", "RS vs SPY %", "Gap from yesterday's close minus what SPY's gap implies for this stock (beta-adjusted)"),
+        ("", f"{TREND_MIN}m vs SPY", f"Change in RS vs SPY over the last {TREND_MIN} minutes"),
+        ("hide-sm", "Gap %", "Change from yesterday's close"),
+        ("l hide-sm", "Level", "Price vs the premarket high/low and yesterday's high/low; hover for prices"),
+        ("hide-sm", "Last", "Price at the snapshot"),
+        ("hind hide-sm", "+1 hour", "Price change from the snapshot price one hour later"),
+        ("hide-sm", "Noon", "Price change from the snapshot price to 12:00 ET"),
+        ("hide-sm", "Close", "Price change from the snapshot price to the close"),
+        ("", "RS after, to close", "Move to the close minus what SPY's move implies. Highlighted when it went the trade's way"),
+        ("hide-sm", "Max up", "Biggest rise after the snapshot"),
+        ("hide-sm", "Max down", "Biggest drop after the snapshot"),
+        ("l", "", ""),
+    ]
+    cls = "pick" + (" " + side if side else "")
+    h = [f'<div class="card"><table class="{cls}"><tr class="grp"><th colspan="7">At {t}</th>'
+         f'<th colspan="6" class="hind">After {t} (hindsight)</th><th></th></tr><tr>'
+         + "".join(f'<th class="{c}" title="{html.escape(tip)}">{lab}</th>' for c, lab, tip in head) + "</tr>"]
     for _, r in d.iterrows():
         key = (f'<a href="/ticker/{r.ticker}">{r.ticker}</a>' if first_col == "ticker"
                else f'<a href="/day/{r.day}?t={r["asof"]}">{r.day}</a>')
@@ -465,17 +520,19 @@ def ranking_table(d: pd.DataFrame, news: pd.DataFrame, first_col: str = "ticker"
         else:
             before = after = mine
         named = int(before.company.sum()) if not before.empty else 0
-        summary = f"Why · news {named}" if not before.empty else "Why"
-        detail = (f'<p>{why(r, before)}</p><div class="cols"><div><b>Headlines before {r["asof"]}</b>'
-                  f'{headline_list(before)}</div><div><b>Later that day</b>{headline_list(after, 8)}</div></div>')
-        h.append(f'<tr><td class="l">{key}</td><td>{r["last"]:.2f}</td><td>{pct(r.gap)}</td><td>{pct(r.rs)}</td>'
-                 f"<td>{pct(r.trend)}</td><td>{pct(r.score, 1)}</td>"
-                 f"<td>{r.pm_hi:.2f} / {r.pm_lo:.2f}</td><td>{r.prev_hi:.2f} / {r.prev_lo:.2f}</td>"
-                 f"<td>{pct(r.fwd_1h)}</td><td>{pct(r.fwd_noon)}</td>"
-                 f"<td>{pct(r.fwd_close)}</td><td>{pct(r.fwd_rs)}</td><td>{pct(r.fwd_hi)}</td>"
-                 f'<td>{pct(r.fwd_lo)}</td><td class="l"><button class="tog" aria-expanded="false">'
-                 f"{summary}</button></td></tr>"
-                 f'<tr class="detail" hidden><td colspan="15">{detail}</td></tr>')
+        badge = f'<span class="badge" title="company headlines before {r["asof"]}">{named}</span>' if not before.empty else ""
+        detail = (f'<div><p>{why(r, before)}</p><div class="cols"><div><b>Headlines before {r["asof"]}</b>'
+                  f'{headline_list(before)}</div><div><b>Later that day</b>{headline_list(after, 8)}</div></div></div>')
+        won = pd.notna(r.fwd_rs) and ((side == "call" and r.fwd_rs > 0) or (side == "put" and r.fwd_rs < 0))
+        rid = f"d-{r.ticker}-{r.day}-{r['asof'].replace(':', '')}"
+        h.append(f'<tr><td class="l">{key}</td><td>{pct(r.score, 1)}</td><td>{pct(r.rs)}</td>'
+                 f'<td>{pct(r.trend)}</td><td class="hide-sm">{pct(r.gap)}</td>'
+                 f'<td class="l hide-sm">{level_chips(r)}</td><td class="hide-sm">{r["last"]:.2f}</td>'
+                 f'<td class="hind hide-sm">{pct(r.fwd_1h)}</td><td class="hide-sm">{pct(r.fwd_noon)}</td>'
+                 f'<td class="hide-sm">{pct(r.fwd_close)}</td><td class="{"win" if won else ""}">{pct(r.fwd_rs)}</td>'
+                 f'<td class="hide-sm">{pct(r.fwd_hi)}</td><td class="hide-sm">{pct(r.fwd_lo)}</td>'
+                 f'<td class="l"><button class="tog" aria-expanded="false" aria-controls="{rid}">Why{badge}</button></td></tr>'
+                 f'<tr class="detail" id="{rid}" hidden><td colspan="14">{detail}</td></tr>')
     h.append("</table></div>")
     return "".join(h)
 
@@ -494,15 +551,19 @@ def day_view(day):
     src = "recorded live" if (d.source == "live").any() else "rebuilt from 1-minute history"
     n = min(10, len(d) // 2)
     strong, weak, rest = d.head(n), d.tail(n).iloc[::-1], d.iloc[n:len(d) - n]
-    body = (f"<h1>{day}</h1><p class='mute'>{spy} · {src}. The +1 hour, Noon and Close columns are the "
-            f"stock's price change from its {t} price. vs SPY to close is the same move after taking out "
-            f"what SPY's move implies. Best and worst are the biggest swings up and down after {t}. "
-            f"Open <i>Why / news</i> for the reasons behind the ranking and the headlines.</p>"
-            f"<div class='tabs'>{tabs}</div>"
-            f"<h2>Relative strength (calls)</h2>{ranking_table(strong, news)}"
-            f"<h2>Relative weakness (puts)</h2>{ranking_table(weak, news)}"
-            f"<h2>The rest of the watchlist ({len(rest)})</h2>"
-            f"<p class='mute'>Not picked at {t}, strongest first.</p>{ranking_table(rest, news)}")
+    body = (f"<h1>{day}</h1><div class='tabs'>{tabs}</div><p class='mute'>{spy} · {src}</p>"
+            f"<details class='how'><summary>How to read this</summary>"
+            f"<p><b>At {t}</b>: what you could see at the snapshot. Score ranks the list; RS vs SPY is the gap "
+            f"beyond what SPY's move implies for the stock; {TREND_MIN}m vs SPY shows whether it's gaining or "
+            f"losing ground right now; Level shows whether price has cleared the premarket or yesterday's "
+            f"high/low (hover for prices).</p><p><b>After {t}</b>: what happened next, from the {t} price. "
+            f"RS after, to close is highlighted when the stock moved the trade's way (up vs SPY for calls, "
+            f"down vs SPY for puts). Price colours always mean up/down, not win/loss. Hover any column name "
+            f"for its definition. <i>Why</i> opens the reasons and the headlines.</p></details>"
+            f"<h2>Relative strength (calls)</h2>{ranking_table(strong, news, side='call')}"
+            f"<h2>Relative weakness (puts)</h2>{ranking_table(weak, news, side='put')}"
+            f"<details class='rest'><summary>The rest of the watchlist ({len(rest)}), not picked at {t}</summary>"
+            f"{ranking_table(rest, news)}</details>")
     return page(f"RS {day}", body)
 
 
