@@ -17,6 +17,7 @@ import pandas as pd
 from flask import Flask, abort, jsonify, redirect, render_template_string, request
 
 import app as core
+import playbook as pb
 import premarket_rs as rs
 
 SNAPSHOTS = core.SNAPSHOTS
@@ -308,6 +309,20 @@ details.help .panel{position:absolute;right:0;top:32px;width:min(420px,90vw);bac
 .side.call{color:var(--pos);border-color:var(--pos)} .side.put{color:var(--neg);border-color:var(--neg)}
 .pick .kv{display:flex;gap:2px 14px;flex-wrap:wrap;font-size:13px} .pick .kv span b{font-size:15px}
 .pick .lv,.pick .hl{font-size:13px} .pick .hl{color:var(--mute)}
+.signal{padding:14px 16px;margin:12px 0 4px}
+.signal.go{border:2px solid var(--acc);background:color-mix(in srgb,var(--acc) 7%,var(--card))}
+.signal.watch{border-style:dashed} .signal.none{color:var(--mute)} .signal p{margin:4px 0}
+.sig-hd{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--acc)}
+.signal.none .sig-hd,.signal.watch .sig-hd{color:var(--mute)}
+.sig-main{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin:6px 0}
+.sig-main .tk{font-size:24px;font-weight:800}
+.plan{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px;margin:8px 0 2px}
+.plan span{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.plan small{font-size:11px;color:var(--mute)} .plan b{font-size:17px;font-variant-numeric:tabular-nums}
+.sig-note{font-size:12px}
+.sig-res{display:flex;gap:18px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--line);margin-top:8px;padding-top:8px}
+.sig-res .big{font-size:20px;font-weight:700}
+.star{color:#c98a00;font-size:13px;cursor:help}
 .after{border-top:1px solid var(--line);margin-top:6px;padding-top:8px}
 .after-hd{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}
 .after svg{width:100%;height:auto;max-width:320px}
@@ -568,6 +583,61 @@ def verdict(stats: pd.DataFrame, n_days: int) -> str:
             f"Clear so far: {', '.join(clear['asof']) or 'none'}.</div>")
 
 
+def playbook_results() -> pd.DataFrame:
+    """Every recorded day under the playbook: the signal, its simulated result, and the average
+    result of the names the rule chose from (the 'no skill' baseline)."""
+    r = query("SELECT day, ticker, score, last, pm_hi, fwd_path FROM scans WHERE asof=? AND fwd_path IS NOT NULL",
+              pb.ENTRY)
+    out = []
+    for day, g in r.groupby("day"):
+        top, rule, why_not = pb.signal(g, day)
+        if rule is None:
+            continue
+        base = [pb.simulate(p)[0] for p in pb.pool(g, rule).fwd_path]
+        ret, how = pb.simulate(top.fwd_path) if top is not None else (None, why_not)
+        out.append({"day": day, "rule": rule, "ticker": top.ticker if top is not None else "",
+                    "ret": ret, "how": how, "base": sum(base) / len(base) if base else None})
+    return pd.DataFrame(out)
+
+
+def money(v: float) -> str:
+    return f"{'+' if v >= 0 else '−'}${abs(v):,.0f}"
+
+
+def playbook_scorecard() -> str:
+    res = playbook_results()
+    if res.empty:
+        return ""
+    tr = res.dropna(subset=["ret"])
+    mid = sorted(res.day)[len(res) // 2]
+    rows = []
+    for label, g in (("All signals", tr), ("Mon/Wed mega-cap outliers", tr[tr.rule == "mega"]),
+                     ("Friday full-list picks", tr[tr.rule == "full"])):
+        if g.empty:
+            continue
+        h1, h2 = g[g.day < mid].ret.mean(), g[g.day >= mid].ret.mean()
+        rows.append(f'<tr><td class="l">{label}</td><td>{len(g)}</td><td><b>{num(g.ret.mean() * 100, 0)}</b></td>'
+                    f"<td>{(g.ret > 0).mean():.0%}</td><td>{num(h1 * 100, 0)} / {num(h2 * 100, 0)}</td>"
+                    f"<td>{num(g.base.mean() * 100, 0)}</td><td>{money(g.ret.mean() * 1000)}</td></tr>")
+    recent = []
+    for x in res.sort_values("day", ascending=False).head(12).itertuples():
+        res_txt = (f'<span class="res {"win" if x.ret > 0 else "loss"}">{"✓" if x.ret > 0 else "✗"} {x.ret:+.0%}</span>'
+                   if pd.notna(x.ret) else '<span class="mute">no trade</span>')
+        recent.append(f'<tr><td class="l"><a href="/day/{x.day}?t={pb.ENTRY}">{short_day(x.day)}</a></td>'
+                      f'<td class="l">{pb.RULE_NAMES[x.rule]}</td><td class="l tk">{x.ticker or "–"}</td>'
+                      f'<td class="l">{res_txt}</td><td class="l mute">{esc(x.how)}</td></tr>')
+    return (f"<h2>Playbook scorecard</h2>"
+            f'<p class="legend">Mon/Wed: the top mega cap if its score is ≥ {pb.OUTLIER} and it\'s above its premarket '
+            f"high at {pb.ENTRY}. Fri: the #1 of the full list if above its premarket high. Simulated 0DTE calls: "
+            f"stop −{pb.STOP}% (≈ −50%), half at +{pb.HALF:g}% (≈ +100%), rest at +{pb.RUNNER:g}% (≈ +200%) or noon, "
+            f"5% spread. Results are % of the premium paid. <b>In-sample:</b> these rules were chosen by looking at "
+            f"these same days, so expect real results to be lower; the out-of-sample test is what counts.</p>"
+            '<div class="card tbl"><table><tr><th class="l"></th><th>Trades</th><th>Avg per trade</th><th>Winners</th>'
+            "<th>1st half / 2nd half</th><th title='Same rules on every name the rule chose from that day'>Avg name, same days</th>"
+            f"<th>$ per trade at $1k</th></tr>{''.join(rows)}</table></div>"
+            f"<h2>Recent playbook days</h2><div class=\"card tbl\"><table>{''.join(recent)}</table></div>")
+
+
 def picks_did(t: str) -> str:
     """Plain price moves after the snapshot for the top 2 calls and puts, vs any stock on the list."""
     r = query("SELECT day, score, fwd_1h, fwd_close, fwd_hi, fwd_lo FROM scans WHERE asof=? AND fwd_close IS NOT NULL", t)
@@ -608,7 +678,7 @@ def review():
     stats = snapshot_stats(ds)
     n_days = rows.day.nunique()
     viewed = request.args.get("day", "")
-    body = [f"<h1>Does the ranking work?</h1>{verdict(stats, n_days)}",
+    body = [f"<h1>Does the ranking work?</h1>{verdict(stats, n_days)}", playbook_scorecard(),
             f'<div class="card chart" style="margin-top:10px">{dot_plot(stats)}</div>',
             f"<h2>Every session, every snapshot</h2>"
             f'<p class="legend">Each square is one day: <span class="pos">blue</span> = the top {TOP_N} beat the '
@@ -803,6 +873,9 @@ def rank_table(d: pd.DataFrame, news: pd.DataFrame, has_news, t: str, side: str,
                                     ("won" if won else "lost") if hindsight and side and pd.notna(r.fwd_rs) else "") if c)
         label = (f'<a href="/ticker/{r.ticker}?day={r.day}&t={t}">{r.ticker}</a>' if first == "ticker"
                  else f'<a href="/day/{r.day}?t={t}#{r.ticker}">{short_day(r.day)}</a>')
+        if pb.is_outlier(r):
+            label += (f' <span class="star" title="Mega cap with a score of {pb.OUTLIER}+: the playbook\'s '
+                      f'Mon/Wed signal. In the backtest these ran more often than other mega caps.">★</span>')
         row_news = news_ok(r.day, r.ticker)
         badge = (f'<span class="badge">{n_company}</span>' if row_news
                  else '<span class="badge none" title="No headlines saved for this day">–</span>')
@@ -836,6 +909,50 @@ def rank_table(d: pd.DataFrame, news: pd.DataFrame, has_news, t: str, side: str,
                  f'<tr class="detail" id="{rid}" hidden><td colspan="{len(head)}">{detail}</td></tr>')
     h.append("</table></div>")
     return "".join(h)
+
+
+def signal_card(day: str, t: str, live: bool) -> str:
+    """The playbook's trade for the day, with the exact plan, or why there isn't one."""
+    rule = pb.rule_for(day)
+    wday = f"{dt.date.fromisoformat(day):%A}"
+    if t < pb.ENTRY:
+        if rule is None:
+            return (f'<div class="card signal none"><div class="sig-hd">Playbook · {wday}</div>'
+                    "<p>No playbook trade on Tuesdays and Thursdays.</p></div>")
+        rows = query("SELECT * FROM scans WHERE day=? AND asof=?", day, t)
+        cand = pb.pool(rows, rule).sort_values("score", ascending=False).head(3)
+        watch = ", ".join(f'<a href="/ticker/{r.ticker}?day={day}&t={t}">{r.ticker}</a> {r.score:+.1f}' for r in cand.itertuples())
+        what = (f"mega caps nearing a score of {pb.OUTLIER}" if rule == "mega" else "the top of the full list")
+        return (f'<div class="card signal watch"><div class="sig-hd">Playbook · {wday} · {pb.RULE_NAMES[rule]}</div>'
+                f"<p>The signal is taken at {pb.ENTRY}, after the open. Watching {what}: {watch}.</p></div>")
+    rows = query("SELECT * FROM scans WHERE day=? AND asof=?", day, pb.ENTRY)
+    if rows.empty:
+        return ""
+    top, rule, why_not = pb.signal(rows, day)
+    title = f"Playbook · {wday}" + (f" · {pb.RULE_NAMES[rule]}" if rule else "")
+    if top is None:
+        return f'<div class="card signal none"><div class="sig-hd">{title}</div><p>{why_not}</p></div>'
+    p = pb.plan(top)
+    reason = (f"score {top.score:+.1f} (≥ {pb.OUTLIER}), the strongest mega cap, above its premarket high"
+              if rule == "mega" else f"#1 of the full list (score {top.score:+.1f}), above its premarket high")
+    out = ""
+    ret, how = pb.simulate(top.get("fwd_path"))
+    if ret is not None and not live:
+        mp = query("SELECT spy_path FROM market WHERE day=? AND asof=?", day, pb.ENTRY)
+        spy = mp.spy_path[0] if not mp.empty else None
+        out = (f'<div class="sig-res"><div>{sparkline(top.fwd_path, spy, "call", pb.ENTRY, 300, 70, big=True)}</div>'
+               f'<div><div class="mute">Simulated result</div><div class="big {"pos" if ret > 0 else "neg"}">'
+               f'{"✓" if ret > 0 else "✗"} {ret:+.0%} of premium</div><div class="mute">{how}</div></div></div>')
+    return (f'<div class="card signal go"><div class="sig-hd">★ {title}</div>'
+            f'<div class="sig-main"><a class="tk" href="/ticker/{top.ticker}?day={day}&t={pb.ENTRY}">{top.ticker}</a>'
+            f'<span class="side call">0DTE calls</span><span class="mute">{reason}</span></div>'
+            f'<div class="plan"><span><small>Entry ({pb.ENTRY})</small><b>{p["entry"]:.2f}</b></span>'
+            f'<span><small>Stop (−{pb.STOP}%)</small><b>{p["stop"]:.2f}</b></span>'
+            f'<span><small>Sell half (+{pb.HALF:g}%)</small><b>{p["half"]:.2f}</b></span>'
+            f'<span><small>Runner (+{pb.RUNNER:g}%)</small><b>{p["runner"]:.2f}</b></span>'
+            f'<span><small>Out by</small><b>{p["exit"]}</b></span></div>'
+            f'<p class="mute sig-note">Stock prices. After selling half, move the stop on the rest to the entry price.</p>'
+            f"{out}</div>")
 
 
 def waiting_page(today: str) -> str:
@@ -904,6 +1021,7 @@ def day_view(day):
                  if live else "")
         body.append(f'<div class="banner"><b>Premarket: context only, don\'t act on this ranking yet.</b>{record}{count}</div>')
 
+    body.append(signal_card(day, t, live))
     strong, weak = d.head(TOP_N), d.tail(TOP_N).iloc[::-1]
     rest = d.iloc[TOP_N:len(d) - TOP_N]
     news_for = lambda tk: news[news.ticker == tk] if not news.empty else news

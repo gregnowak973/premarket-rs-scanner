@@ -163,6 +163,27 @@ def last_at(series: pd.Series, t: dt.datetime) -> float:
 PATH_STEP = dt.timedelta(minutes=5)
 
 
+def premarket_range(pm: pd.DataFrame) -> tuple[float, float]:
+    """Premarket high and low, ignoring bad prints: a bar whose high (or low) is more than 3%
+    away from the closes on both sides of it, unconfirmed by its neighbours, is treated as a
+    spike and replaced by its open/close. Thin premarket feeds throw these off by 10-20%."""
+    if pm.empty:
+        return np.nan, np.nan
+    c = pm["Close"].to_numpy()
+    body_hi = np.maximum(pm["Open"].to_numpy(), c)
+    body_lo = np.minimum(pm["Open"].to_numpy(), c)
+    prev = np.concatenate(([c[0]], c[:-1]))
+    nxt = np.concatenate((c[1:], [c[-1]]))
+    ref_hi = np.maximum(np.maximum(prev, nxt), body_hi) * 1.03
+    ref_lo = np.minimum(np.minimum(prev, nxt), body_lo) * 0.97
+    hi = np.where(pm["High"].to_numpy() > ref_hi, body_hi, pm["High"].to_numpy())
+    lo = np.where(pm["Low"].to_numpy() < ref_lo, body_lo, pm["Low"].to_numpy())
+    # a lone bar whose close itself is way off both neighbours is a bad print too
+    lone = (np.abs(c / prev - 1) > 0.03) & (np.abs(c / nxt - 1) > 0.03)
+    hi, lo = hi[~lone], lo[~lone]
+    return (float(np.nanmax(hi)), float(np.nanmin(lo))) if len(hi) else (np.nan, np.nan)
+
+
 def price_path(closes: pd.Series, start: float, asof: dt.datetime, day: dt.date) -> str:
     """% change from `start` every 5 minutes from `asof` (or the open, if later) to the close,
     as compact comma-separated text for a sparkline."""
@@ -224,8 +245,8 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
             "RSz": rs / sig,
             "Trend%": trend,
             "Trendz": trend / trend_sig,
-            "PMHi": pm["High"].max() if not pm.empty else np.nan,
-            "PMLo": pm["Low"].min() if not pm.empty else np.nan,
+            "PMHi": premarket_range(pm)[0],
+            "PMLo": premarket_range(pm)[1],
             "PrevHi": prev_reg["High"].max(),
             "PrevLo": prev_reg["Low"].min(),
             "PrevCl": pc,

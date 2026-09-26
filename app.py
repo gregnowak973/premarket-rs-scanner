@@ -118,10 +118,15 @@ def db() -> sqlite3.Connection:
 def save(con, day: dt.date, hhmm: str, df: pd.DataFrame, source: str) -> None:
     """Live rows overwrite everything but outcomes; replay rows only fill outcomes and gaps."""
     names = ["day", "asof", "ticker", "source"] + list(COLS.values())
-    keep = FWD if source.startswith("replay") else [c for c in COLS.values() if c not in FWD] + ["source"]
+    if source.startswith("replay"):
+        # outcomes always; the rest only for rows that weren't recorded live (never touch live headlines)
+        sets = [f"{c}=excluded.{c}" for c in FWD] + [
+            f"{c}=CASE WHEN scans.source='live' THEN scans.{c} ELSE excluded.{c} END"
+            for c in COLS.values() if c not in FWD and c not in ("news", "news_n")]
+    else:
+        sets = [f"{c}=excluded.{c}" for c in COLS.values() if c not in FWD] + ["source=excluded.source"]
     sql = (f"INSERT INTO scans ({', '.join(names)}) VALUES ({', '.join('?' * len(names))}) "
-           f"ON CONFLICT(day, asof, ticker) DO UPDATE SET "
-           + ", ".join(f"{c}=excluded.{c}" for c in keep))
+           f"ON CONFLICT(day, asof, ticker) DO UPDATE SET " + ", ".join(sets))
     for t, r in df.iterrows():
         vals = [None if pd.isna(r.get(k)) else (r.get(k) if isinstance(r.get(k), str) else float(r.get(k)))
                 for k in COLS]
@@ -264,40 +269,47 @@ def backfill_deep() -> None:
     record_outcomes(days, intraday, daily, source="replay-5m")
 
 
-def backfill_alpaca(months: int = 12) -> None:
-    """Sessions older than what's recorded, from Alpaca's 1-minute bars, a month at a time.
+def backfill_alpaca(months: int = 12, start: dt.date | None = None, end: dt.date | None = None) -> None:
+    """Sessions from Alpaca's 1-minute bars, a month at a time, newest first.
 
-    Uses today's watchlist for every past day, so a stock that listed or fell off the
-    list since then is judged as if you'd been watching it (survivorship).
+    By default: the `months` before the oldest day already recorded. With start/end: exactly
+    that range (days already recorded are skipped). Uses today's watchlist for every past
+    day, so a stock that listed or fell off the list since then is judged as if you'd been
+    watching it (survivorship).
     """
     import alpaca_data
     tickers = sorted(set(load_tickers()) | {rs.BENCH})
     today = dt.datetime.now(rs.NY).date()
-    oldest = today - dt.timedelta(days=int(months * 30.5))
     with db() as con:
         have = {r[0] for r in con.execute("SELECT DISTINCT day FROM scans")}
-    end = (dt.date.fromisoformat(min(have)) - dt.timedelta(days=1)) if have else today
+    if start is None:
+        end = (dt.date.fromisoformat(min(have)) - dt.timedelta(days=1)) if have else today
+        start = today - dt.timedelta(days=int(months * 30.5))
+    end = end or today
     print("Daily history for betas...")
-    daily = rs.fetch_daily(tickers, period="2y" if months <= 12 else "5y")
-    while end > oldest:
-        start = max(oldest, end - dt.timedelta(days=30))
-        print(f"Alpaca 1-minute bars {start} → {end} ...", flush=True)
+    years = (today - start).days // 365 + 1
+    daily = rs.fetch_daily(tickers, period="2y" if years < 2 else "5y" if years < 5 else "10y")
+    while end >= start:
+        lo = max(start, end - dt.timedelta(days=30))
+        print(f"Alpaca 1-minute bars {lo} → {end} ...", flush=True)
         # a week of extra history so the first day has a previous session
-        bars = alpaca_data.fetch_bars(tickers, start - dt.timedelta(days=7), end)
+        bars = alpaca_data.fetch_bars(tickers, lo - dt.timedelta(days=7), end)
         if rs.BENCH not in bars:
             print("No SPY bars returned; stopping.")
             break
-        days = [d for d in trading_days(bars) if start <= d <= end and d.isoformat() not in have]
+        days = [d for d in trading_days(bars) if lo <= d <= end and d.isoformat() not in have]
         record_outcomes(days, bars, daily, source="replay-alpaca")
-        end = start - dt.timedelta(days=1)
+        end = lo - dt.timedelta(days=1)
 
 
-def refresh_outcomes() -> None:
-    """Recompute outcome columns (e.g. new ones like the price path) for recorded days that lack
-    them, from whichever source still has those days: Yahoo 1-minute, Yahoo 5-minute, or Alpaca."""
+def refresh_outcomes(everything: bool = False) -> None:
+    """Recompute rebuilt days that lack newer outcome columns (e.g. the price path), or with
+    everything=True every rebuilt day (after a change to how scans are computed), from whichever
+    source still has those days: Yahoo 1-minute, Yahoo 5-minute, or Alpaca."""
     with db() as con:
         need = con.execute("SELECT day, MAX(source) FROM scans WHERE asof=? AND fwd_rs IS NOT NULL "
-                           "AND fwd_path IS NULL GROUP BY day", (DEFAULT_VIEW,)).fetchall()
+                           + ("" if everything else "AND fwd_path IS NULL ") + "GROUP BY day",
+                           (DEFAULT_VIEW,)).fetchall()
     if not need:
         return
     today = dt.datetime.now(rs.NY).date()
@@ -374,7 +386,7 @@ def main() -> None:
             except Exception:
                 traceback.print_exc()
     elif cmd == "refresh":
-        refresh_outcomes()
+        refresh_outcomes(everything="--all" in sys.argv)
     elif cmd in ("schedule", "unschedule", "status"):
         import scheduling
         {"schedule": scheduling.install, "unschedule": scheduling.remove, "status": scheduling.status}[cmd]()
