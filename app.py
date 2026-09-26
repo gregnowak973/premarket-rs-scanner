@@ -219,6 +219,8 @@ def signal_now(day: dt.date | None = None) -> tuple[str, str]:
     """Scan `day` (default today) at 09:35 and return the playbook's call."""
     import playbook as pb
     day = day or dt.datetime.now(rs.NY).date()
+    if day.weekday() >= 5:
+        return f"No trading today ({day:%A})", "The market is closed on weekends."
     if pb.rule_for(day.isoformat()) is None:
         return f"No playbook trade ({day:%A})", "Tuesdays and Thursdays are skipped."
     today = dt.datetime.now(rs.NY).date()
