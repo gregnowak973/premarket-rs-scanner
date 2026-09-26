@@ -327,6 +327,11 @@ tr.grp th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;text-alig
 .badge{display:inline-block;min-width:18px;margin-left:4px;padding:0 5px;border-radius:999px;background:var(--line);color:var(--fg);font-size:12px}
 .tog[aria-expanded="true"] .badge{background:#fff3;color:#fff}
 .best td{font-weight:600}
+tr.viewed td{background:color-mix(in srgb,var(--acc) 14%,transparent)} tr.viewed td:first-child{box-shadow:inset 3px 0 var(--acc)}
+.days{display:flex;gap:6px;overflow-x:auto;margin:0 0 14px;padding-bottom:2px}
+.days a{flex:none;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);font-size:13px}
+.days a.on{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:600}
+.days a.step{font-size:16px;line-height:1;padding:4px 10px}
 details.rest>summary{cursor:pointer;color:var(--acc);margin:28px 0 8px;font-weight:600;font-size:16px}
 details.rest td{opacity:.8}
 details.how{margin:4px 0 0} details.how summary{cursor:pointer;color:var(--acc)} details.how p{margin:6px 0;max-width:900px}
@@ -336,7 +341,7 @@ details.how{margin:4px 0 0} details.how summary{cursor:pointer;color:var(--acc)}
 .tabs a.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 nav{margin-bottom:16px}
 </style></head><body><main>
-<nav><a href="/">RS scanner log</a></nav>
+<nav><a href="{{ home }}">← RS scanner log</a></nav>
 {{ body|safe }}
 <footer class="mute" style="margin-top:32px;font-size:12px">Version {{ version }}</footer>
 </main>
@@ -360,8 +365,9 @@ def pp(v):
     return pct(v, unit="%")
 
 
-def page(title: str, body: str) -> str:
-    return render_template_string(BASE, title=title, body=body, version=VERSION)
+def page(title: str, body: str, day: str = "") -> str:
+    home = f"/?day={day}#d-{day}" if day else "/"
+    return render_template_string(BASE, title=title, body=body, version=VERSION, home=home)
 
 
 @app.route("/")
@@ -397,13 +403,14 @@ def home():
     h.append(f'<h2>Sessions (ranking at {DEFAULT_VIEW})</h2><div class="card"><table><tr><th class="l">Day</th>'
              f"<th>SPY gap @{DEFAULT_VIEW}</th><th class='l'>Top 3</th><th class='l'>Bottom 3</th>"
              f"<th>Spread (top {TOP_N} − bottom {TOP_N})</th></tr>")
+    viewed = request.args.get("day", "")
     for day in sorted(rows.day.unique(), reverse=True):
         d = view[view.day == day]
         top, bot = d.nlargest(3, "score"), d.nsmallest(3, "score")
         spread = d.nlargest(TOP_N, "score").fwd_rs.mean() - d.nsmallest(TOP_N, "score").fwd_rs.mean()
         link = lambda g: " ".join(f'<a href="/ticker/{t}">{t}</a>' for t in g.ticker)
         spy = market.spy_gap.get(day)
-        h.append(f'<tr><td class="l"><a href="/day/{day}">{day}</a></td><td>{pp(spy)}</td>'
+        h.append(f'<tr id="d-{day}" class="{"viewed" if day == viewed else ""}"><td class="l"><a href="/day/{day}">{day}</a></td><td>{pp(spy)}</td>'
                  f'<td class="l">{link(top)}</td><td class="l">{link(bot)}</td><td>{pp(spread)}</td></tr>')
     h.append("</table></div>")
     return page("RS scanner log", "".join(h))
@@ -565,7 +572,15 @@ def day_view(day):
     src = "recorded live" if (d.source == "live").any() else "rebuilt from 1-minute history"
     n = min(10, len(d) // 2)
     strong, weak, rest = d.head(n), d.tail(n).iloc[::-1], d.iloc[n:len(d) - n]
-    body = (f"<h1>{day}</h1><div class='tabs'>{tabs}</div><p class='mute'>{spy} · {src}</p>"
+    days = sorted(query("SELECT DISTINCT day FROM scans")["day"])
+    i = days.index(day)
+    prev_ = f'<a class="step" href="/day/{days[i - 1]}?t={t}" title="Previous day">‹</a>' if i > 0 else ""
+    next_ = f'<a class="step" href="/day/{days[i + 1]}?t={t}" title="Next day">›</a>' if i < len(days) - 1 else ""
+    strip = "".join(f'<a class="{"on" if x == day else ""}" href="/day/{x}?t={t}"'
+                    f'{" aria-current=page" if x == day else ""}>{dt.date.fromisoformat(x):%a %b %d}</a>'
+                    for x in days[max(0, i - 5):i + 6])
+    body = (f"<div class='days'>{prev_}{strip}{next_}</div>"
+            f"<h1>{dt.date.fromisoformat(day):%A, %B %d, %Y}</h1><div class='tabs'>{tabs}</div><p class='mute'>{spy} · {src}</p>"
             f"<details class='how'><summary>How to read this</summary>"
             f"<p><b>At {t}</b>: what you could see at the snapshot. Score ranks the list; RS vs SPY is the gap "
             f"beyond what SPY's move implies for the stock; {TREND_MIN}m vs SPY shows whether it's gaining or "
@@ -578,7 +593,7 @@ def day_view(day):
             f"<h2>Relative weakness (puts)</h2>{ranking_table(weak, news, side='put')}"
             f"<details class='rest'><summary>The rest of the watchlist ({len(rest)}), not picked at {t}</summary>"
             f"{ranking_table(rest, news)}</details>")
-    return page(f"RS {day}", body)
+    return page(f"RS {day}", body, day)
 
 
 @app.route("/ticker/<ticker>")
