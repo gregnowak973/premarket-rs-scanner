@@ -18,6 +18,7 @@ import sys
 import shutil
 import tempfile
 import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -31,7 +32,7 @@ SITE_LABEL = f"org.{NAME}.site"
 SITE_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{SITE_LABEL}.plist"
 SITE_LOG = HERE / "data" / "site.log"
 STARTUP = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup" / f"{NAME}-site.vbs"
-URL = "http://localhost:8050"
+URL = "http://127.0.0.1:8050"  # not "localhost": some Macs resolve that to IPv6 first
 CRON_TAG = f"# {NAME}"
 
 
@@ -145,15 +146,66 @@ def _cron_remove() -> None:
     _cron_write(_crontab())
 
 
+def protected_folder() -> str | None:
+    """macOS blocks background jobs from these folders unless Python is given access."""
+    if platform.system() != "Darwin":
+        return None
+    home = Path.home()
+    for name in ("Documents", "Desktop", "Downloads", "Library/Mobile Documents"):
+        if (home / name) in HERE.parents:
+            return name
+    return None
+
+
+def site_up() -> bool:
+    try:
+        with urllib.request.urlopen(URL, timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _tail(path: Path, n: int = 15) -> str:
+    if not path.exists():
+        return "  (no log yet)"
+    return "\n".join("  " + l for l in path.read_text(errors="replace").splitlines()[-n:])
+
+
+def status() -> None:
+    print(f"Folder: {HERE}")
+    if folder := protected_folder():
+        print(f"PROBLEM: the folder is inside ~/{folder}; macOS stops background jobs from reading it.\n"
+              f'  Fix: mv "{HERE}" ~/{NAME} && cd ~/{NAME} && {Path(python()).name} app.py schedule')
+    print(f"Website {URL}: {'UP' if site_up() else 'NOT RESPONDING'}")
+    if platform.system() == "Darwin":
+        r = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+        jobs = [l for l in r.stdout.splitlines() if NAME in l]
+        print("launchd jobs (PID, last exit code, name):")
+        print("\n".join("  " + l for l in jobs) or "  none installed; run: python3 app.py schedule")
+    print(f"Website log ({SITE_LOG.name}):\n{_tail(SITE_LOG)}")
+    print(f"Recorder log ({LOG.name}):\n{_tail(LOG, 8)}")
+
+
 def install() -> None:
+    if folder := protected_folder():
+        sys.exit(f"This folder is inside ~/{folder}, and macOS won't let background jobs read it.\n"
+                 f"Move it to your home folder, then schedule again:\n\n"
+                 f'  mv "{HERE}" ~/{NAME}\n  cd ~/{NAME}\n  {Path(python()).name} app.py schedule\n')
     LOG.parent.mkdir(exist_ok=True)
     system = platform.system()
     {"Darwin": _mac_install, "Windows": _win_install}.get(system, _cron_install)()
     print(f"Scheduled ({system}): the recorder runs every 5 minutes, and the website starts at login.")
     print(f"It records the morning snapshots on weekdays and fills in missed days on its next run. Log: {LOG}")
-    time.sleep(3)
-    print(f"Opening {URL}")
-    webbrowser.open(URL)
+    print("Waiting for the website to start...", end="", flush=True)
+    for _ in range(60):  # the first start can take a while as Python loads pandas
+        if site_up():
+            print(f" up.\nOpening {URL}")
+            webbrowser.open(URL)
+            return
+        time.sleep(1)
+        print(".", end="", flush=True)
+    print(" it didn't start within a minute. Details:\n")
+    status()
 
 
 def remove() -> None:

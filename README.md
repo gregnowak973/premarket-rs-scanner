@@ -12,7 +12,7 @@ python premarket_rs.py --file watchlist.txt --csv out.csv   # same list the reco
 
 ## Daily log and local website
 
-`app.py` records the scan every trading morning into a local SQLite database (`data/scans.db`) and serves the history at http://localhost:8050.
+`app.py` records the scan every trading morning into a local SQLite database (`data/scans.db`) and serves the history at http://127.0.0.1:8050.
 
 **Setup (once):**
 ```
@@ -23,11 +23,18 @@ python app.py schedule    # run in the background from now on, then open the sit
 
 `schedule` sets up two things for your OS (macOS launchd, Windows Task Scheduler plus the Startup folder, Linux cron):
 - **Recorder:** `python app.py record` runs every 5 minutes. On weekdays it takes snapshots at 08:00, 08:30, 09:00, 09:15, 09:29, 09:35, 09:45 and 10:00 ET, with headlines. Snapshot times are ET whatever your time zone.
-- **Website:** starts when you log in and stays up at http://localhost:8050.
+- **Website:** starts when you log in and stays up at http://127.0.0.1:8050.
 
 **Missed days are filled in automatically.** Each run checks the last ~30 days for any weekday that isn't recorded, whether the computer was off, asleep or offline. It rebuilds those days from Yahoo's 1-minute history, then adds rest-of-day outcomes once each session closes. Rebuilt days have prices and outcomes but no headlines, because Yahoo drops old news. Days older than ~30 days can't be recovered.
 
 `python app.py unschedule` removes both jobs. Logs are in `data/record.log` and `data/site.log`. On macOS, keep the folder outside Documents/Desktop/Downloads, or allow Python access when macOS asks; otherwise the background job can't read it.
+
+### If the website won't load
+
+Run `python3 app.py status`. It shows whether the site is up, whether the background jobs are installed, and the latest log lines. Common causes on a Mac:
+- **The folder is in Documents, Desktop, Downloads or iCloud Drive.** macOS won't let background jobs read those folders. `schedule` now refuses to install there and prints the command to move the folder.
+- **You opened `localhost:8050`.** Use http://127.0.0.1:8050; some Macs send `localhost` to IPv6, where the site isn't listening.
+- **To see errors directly**, run the site in the foreground: `python3 app.py serve --site-only`, then open http://127.0.0.1:8050.
 
 Pages:
 - **Home:** for each snapshot time, how the top 5 and bottom 5 did afterward, split by whether the top names had company news. Below that, one row per session.

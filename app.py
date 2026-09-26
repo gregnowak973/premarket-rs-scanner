@@ -2,11 +2,12 @@
 """
 Records the RS scanner every trading morning and serves the history on a local website.
 
-    python app.py              # website at http://localhost:8050, records scans while it runs
+    python app.py              # website at http://127.0.0.1:8050, records scans while it runs
     python app.py backfill     # load the last ~30 trading days from Yahoo (run once)
     python app.py record       # record whatever is due right now, catch up missed days, then exit
     python app.py schedule     # run `record` every 5 minutes in the background (macOS, Windows, Linux)
     python app.py unschedule   # remove that background job
+    python app.py status       # is the website up? recent log lines, for troubleshooting
 
 While the site is running it takes a snapshot at each time in SNAPSHOTS on weekdays,
 with headlines, and after 16:05 ET fills in what each stock did for the rest of the day.
@@ -374,9 +375,9 @@ def main() -> None:
                 record_due(dt.datetime.now(rs.NY), set())
             except Exception:
                 traceback.print_exc()
-    elif cmd in ("schedule", "unschedule"):
+    elif cmd in ("schedule", "unschedule", "status"):
         import scheduling
-        scheduling.install() if cmd == "schedule" else scheduling.remove()
+        {"schedule": scheduling.install, "unschedule": scheduling.remove, "status": scheduling.status}[cmd]()
     elif cmd == "serve":
         if sys.stdout is None:  # started hidden (pythonw), so log to a file
             DB.parent.mkdir(exist_ok=True)
@@ -384,7 +385,7 @@ def main() -> None:
         if "--site-only" not in sys.argv:  # the scheduled `record` job does the recording instead
             threading.Thread(target=scheduler, daemon=True).start()
             print(f"Recording {', '.join(SNAPSHOTS)} ET on weekdays")
-        print(f"RS scanner log: http://localhost:{PORT}")
+        print(f"RS scanner log: http://127.0.0.1:{PORT}")
         app.run(host="127.0.0.1", port=PORT)
     else:
         sys.exit(__doc__)
