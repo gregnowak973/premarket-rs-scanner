@@ -18,11 +18,13 @@ Rebuilt snapshots have prices and outcomes but no headlines.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import sqlite3
 import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 try:
@@ -58,9 +60,10 @@ COLS = {
     "Trend%": "trend", "Trendz": "trendz", "PMHi": "pm_hi", "PMLo": "pm_lo",
     "PrevHi": "prev_hi", "PrevLo": "prev_lo", "PrevCl": "prev_cl", "Score": "score",
     "Div": "div", "FwdRS%": "fwd_rs", "FwdHi%": "fwd_hi", "FwdLo%": "fwd_lo",
+    "Fwd1h%": "fwd_1h", "FwdNoon%": "fwd_noon", "FwdClose%": "fwd_close",
     "News": "news", "NewsN": "news_n",
 }
-FWD = ["fwd_rs", "fwd_hi", "fwd_lo"]
+FWD = ["fwd_rs", "fwd_hi", "fwd_lo", "fwd_1h", "fwd_noon", "fwd_close"]
 lock = threading.Lock()
 
 
@@ -78,7 +81,18 @@ def db() -> sqlite3.Connection:
             day TEXT, asof TEXT, spy_gap REAL, spy_trend REAL, PRIMARY KEY (day, asof));
         CREATE TABLE IF NOT EXISTS done (day TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS news (
+            ticker TEXT, ts TEXT, title TEXT, link TEXT, publisher TEXT, company INTEGER,
+            PRIMARY KEY (ticker, title));
     """)
+    have = {r[1] for r in con.execute("PRAGMA table_info(scans)")}
+    added = [c for c in COLS.values() if c not in have]
+    for c in added:
+        con.execute(f"ALTER TABLE scans ADD COLUMN {c} {'TEXT' if c in ('div', 'news') else 'REAL'}")
+    if added:  # new outcome columns: recompute outcomes for every day still in Yahoo's history
+        con.execute("DELETE FROM done")
+        con.execute("DELETE FROM state WHERE key='catch_up'")
+        con.commit()
     return con
 
 
@@ -117,6 +131,27 @@ def load_market(start: dt.date | None = None):
 
 # ------------------------------------------------------------ recording ----
 
+def store_news(min_gap: dt.timedelta = dt.timedelta(minutes=25)) -> None:
+    """Save Yahoo's latest headlines for every ticker. Yahoo drops old stories, so keeping
+    them here is what lets the site show the news behind past sessions."""
+    now = dt.datetime.now(dt.timezone.utc)
+    with db() as con:
+        last = con.execute("SELECT value FROM state WHERE key='news'").fetchone()
+    if last and now - dt.datetime.fromisoformat(last[0]) < min_gap:
+        return
+    tickers = load_tickers()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        fetched = dict(zip(tickers, pool.map(rs.news_items, tickers)))
+    with lock, db() as con:
+        for t, items in fetched.items():
+            con.executemany(
+                "INSERT OR IGNORE INTO news VALUES (?, ?, ?, ?, ?, ?)",
+                [(t, n["ts"].isoformat(), n["title"], n["link"], n["publisher"], int(rs.is_company(t, n["title"])))
+                 for n in items])
+        con.execute("INSERT OR REPLACE INTO state VALUES ('news', ?)", (now.isoformat(),))
+    print(f"{now:%Y-%m-%d %H:%M}Z: saved headlines for {len(fetched)} tickers")
+
+
 def at(day: dt.date, hhmm: str) -> dt.datetime:
     return dt.datetime.combine(day, dt.time.fromisoformat(hhmm), tzinfo=rs.NY)
 
@@ -126,6 +161,7 @@ def record_live(day: dt.date, hhmm: str) -> None:
     if rs.BENCH not in intraday or day not in set(intraday[rs.BENCH].index.date):
         print(f"{day} {hhmm}: no session today (holiday?), skipping")
         return
+    store_news()
     df = rs.scan(load_tickers(), day, at(day, hhmm), TREND_MIN, intraday, daily, with_news=True)
     with lock, db() as con:
         save(con, day, hhmm, df, "live")
@@ -169,6 +205,7 @@ def catch_up(now: dt.datetime, force: bool = False) -> None:
         tried = con.execute("SELECT value FROM state WHERE key='catch_up'").fetchone()
     missing = [d for d in (oldest + dt.timedelta(days=i) for i in range((last_done - oldest).days + 1))
                if d.weekday() < 5 and d.isoformat() not in done]
+    store_news(dt.timedelta(minutes=25) if missing or force else dt.timedelta(hours=3))
     if not missing:
         return
     if not force and tried and now - dt.datetime.fromisoformat(tried[0]) < dt.timedelta(hours=1):
@@ -235,7 +272,7 @@ def snapshot_stats(rows: pd.DataFrame) -> pd.DataFrame:
             days.append({
                 "top": top.fwd_rs.mean(), "bot": bot.fwd_rs.mean(),
                 "top_news": top[top.news_n > 0].fwd_rs.mean(),
-                "top_nonews": top[top.news_n.fillna(0) == 0].fwd_rs.mean() if top.news_n.notna().any() else float("nan"),
+                "top_nonews": top[top.news_n == 0].fwd_rs.mean(),
             })
         s = pd.DataFrame(days)
         out.append({"asof": hhmm, "days": len(s), "top": s.top.mean(), "bot": s.bot.mean(),
@@ -259,6 +296,11 @@ table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
 th{font-weight:600;color:var(--mute);font-size:12px} tr:last-child td{border-bottom:0}
 td.l,th.l{text-align:left} td.news{white-space:normal;min-width:260px;text-align:left;color:var(--mute)}
+.tog{font:inherit;color:var(--acc);background:none;border:1px solid var(--line);border-radius:6px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.tog[aria-expanded="true"]{background:var(--acc);color:#fff;border-color:var(--acc)}
+tr.detail td{text-align:left;white-space:normal;background:var(--bg);padding:10px 14px 14px}
+tr.detail p{margin:0 0 10px;max-width:900px} tr.detail ul{margin:4px 0 0;padding-left:18px} tr.detail li{margin:3px 0}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:8px 28px}
 .up{color:var(--up)} .dn{color:var(--dn)}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0} .tabs a{padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--card)}
 .tabs a.on{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -266,7 +308,14 @@ nav{margin-bottom:16px}
 </style></head><body><main>
 <nav><a href="/">RS scanner log</a></nav>
 {{ body|safe }}
-</main></body></html>"""
+</main>
+<script>
+document.addEventListener("click", e => {
+  const b = e.target.closest(".tog"); if (!b) return;
+  const row = b.closest("tr").nextElementSibling; row.hidden = !row.hidden;
+  b.setAttribute("aria-expanded", String(!row.hidden));
+});
+</script></body></html>"""
 
 
 def pct(v, digits=2, unit=""):
@@ -286,6 +335,8 @@ def page(title: str, body: str) -> str:
 @app.route("/")
 def home():
     rows = query("SELECT day, asof, ticker, score, fwd_rs, news_n FROM scans")
+    if not rows.empty:
+        rows["news_n"] = company_news_counts(rows).fillna(rows.news_n).values
     if rows.empty:
         return page("RS scanner log", "<h1>No scans yet</h1><p>Run <code>python app.py backfill</code> "
                     "to load the last month, or leave this running on a weekday morning.</p>")
@@ -318,20 +369,113 @@ def home():
     return page("RS scanner log", "".join(h))
 
 
-def ranking_table(d: pd.DataFrame, first_col: str = "ticker") -> str:
+def et(day: str, hhmm: str) -> pd.Timestamp:
+    return pd.Timestamp(f"{day} {hhmm}", tz=rs.NY)
+
+
+def prev_close(day: str) -> pd.Timestamp:
+    """16:00 ET on the session before `day` (weekends skipped; holidays count as sessions)."""
+    d = dt.date.fromisoformat(day) - dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return et(d.isoformat(), "16:00")
+
+
+def load_news(tickers: list[str], start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    q = ",".join("?" * len(tickers))
+    n = query(f"SELECT * FROM news WHERE ticker IN ({q}) AND ts >= ? AND ts <= ?", *tickers,
+              start.tz_convert("UTC").isoformat(), end.tz_convert("UTC").isoformat())
+    n["ts"] = pd.to_datetime(n.ts, utc=True, format="ISO8601").dt.tz_convert(rs.NY)
+    return n.sort_values(["company", "ts"], ascending=[False, False])
+
+
+def company_news_counts(rows: pd.DataFrame) -> pd.Series:
+    """Company headlines between the previous close and each snapshot, per (day, asof, ticker)."""
+    n = query("SELECT ticker, ts FROM news WHERE company=1")
+    if n.empty:
+        return pd.Series(float("nan"), index=rows.index)
+    n["ts"] = pd.to_datetime(n.ts, utc=True, format="ISO8601")
+    r = rows[["day", "asof", "ticker"]].reset_index()
+    r["lo"] = r.day.map(lambda d: prev_close(d).tz_convert("UTC"))
+    r["hi"] = [et(d, a).tz_convert("UTC") for d, a in zip(r.day, r["asof"])]
+    m = r.merge(n, on="ticker")
+    m = m[(m.ts >= m.lo) & (m.ts <= m.hi)]
+    counts = m.groupby("index").size().reindex(r["index"]).fillna(0)
+    # Days before any headline was saved have no news data at all, rather than no news.
+    first = n.ts.min()
+    counts[(r.set_index("index").hi < first).values] = float("nan")
+    return counts
+
+
+def why(r, before: pd.DataFrame) -> str:
+    """Plain-English reasons behind a row's score."""
+    bits = [f"Gap {r.gap:+.2f}% vs yesterday's close, {r.rs:+.2f}% beyond what SPY's move implies."]
+    if abs(r.trendz) >= 1:
+        bits.append(f"{'Gaining on' if r.trend > 0 else 'Losing to'} SPY fast: {r.trend:+.2f}% in the last {TREND_MIN} min.")
+    elif abs(r.trendz) >= 0.3:
+        bits.append(f"{'Gaining on' if r.trend > 0 else 'Slipping vs'} SPY: {r.trend:+.2f}% in the last {TREND_MIN} min.")
+    else:
+        bits.append(f"Flat vs SPY over the last {TREND_MIN} min.")
+    if r["div"]:
+        bits.append("Moving opposite to SPY: " + ("up while SPY dipped." if r["div"].startswith("UP") else "down while SPY rose."))
+    lv = []
+    if r["last"] > r.prev_hi: lv.append("above yesterday's high")
+    if r["last"] < r.prev_lo: lv.append("below yesterday's low")
+    if pd.notna(r.pm_hi) and r["asof"] >= "09:30":
+        if r["last"] > r.pm_hi: lv.append("above the premarket high")
+        if r["last"] < r.pm_lo: lv.append("below the premarket low")
+    bits.append(("Price is " + " and ".join(lv) + ".") if lv else "Inside yesterday's range.")
+    named = int(before.company.sum()) if not before.empty else 0
+    if before.empty and r.news_n != r.news_n:  # no saved headlines and none recorded live
+        bits.append("No headlines saved for this day.")
+    else:
+        bits.append(f"{named} company headline{'s' if named != 1 else ''} since yesterday's close"
+                    + (f" (+{len(before) - named} sector/market)." if len(before) > named else "."))
+    return " ".join(bits)
+
+
+def headline_list(n: pd.DataFrame, limit: int = 12) -> str:
+    if n.empty:
+        return '<p class="mute">None saved.</p>'
+    items = []
+    for _, x in n.head(limit).iterrows():
+        title = html.escape(x.title)
+        link = f'<a href="{html.escape(x.link)}" target="_blank" rel="noopener">{title}</a>' if x.link else title
+        tag = "" if x.company else ' <span class="mute">(sector)</span>'
+        items.append(f'<li><span class="mute">{x.ts:%a %H:%M}</span> {link}{tag} '
+                     f'<span class="mute">· {html.escape(x.publisher or "")}</span></li>')
+    more = f'<li class="mute">+{len(n) - limit} more</li>' if len(n) > limit else ""
+    return f"<ul>{''.join(items)}{more}</ul>"
+
+
+def ranking_table(d: pd.DataFrame, news: pd.DataFrame, first_col: str = "ticker") -> str:
     h = ['<div class="card"><table><tr>'
          f'<th class="l">{"Ticker" if first_col == "ticker" else "Day"}</th><th>Last</th><th>Gap%</th><th>RS%</th>'
-         "<th>Trend%</th><th>Score</th><th>PM hi / lo</th><th>Prev hi / lo</th><th class='l'>Div</th>"
-         "<th>Fwd RS%</th><th>Fwd best%</th><th>Fwd worst%</th><th class='l'>News</th></tr>"]
+         "<th>Trend%</th><th>Score</th><th>PM hi / lo</th><th>Prev hi / lo</th>"
+         "<th>+1 hour</th><th>Noon</th><th>Close</th><th>vs SPY to close</th>"
+         "<th>Best</th><th>Worst</th><th class='l'>Why / news</th></tr>"]
     for _, r in d.iterrows():
         key = (f'<a href="/ticker/{r.ticker}">{r.ticker}</a>' if first_col == "ticker"
                else f'<a href="/day/{r.day}?t={r["asof"]}">{r.day}</a>')
-        news = "" if not isinstance(r.news, str) or not r.news else f"({int(r.news_n or 0)}) {r.news}"
+        mine = news[news.ticker == r.ticker] if not news.empty else news
+        if not mine.empty:
+            snap = et(r.day, r["asof"])
+            mine = mine[mine.ts >= prev_close(r.day)]
+            before, after = mine[mine.ts <= snap], mine[(mine.ts > snap) & (mine.ts <= et(r.day, "16:00"))]
+        else:
+            before = after = mine
+        named = int(before.company.sum()) if not before.empty else 0
+        summary = f"Why · news {named}" if not before.empty else "Why"
+        detail = (f'<p>{why(r, before)}</p><div class="cols"><div><b>Headlines before {r["asof"]}</b>'
+                  f'{headline_list(before)}</div><div><b>Later that day</b>{headline_list(after, 8)}</div></div>')
         h.append(f'<tr><td class="l">{key}</td><td>{r["last"]:.2f}</td><td>{pct(r.gap)}</td><td>{pct(r.rs)}</td>'
                  f"<td>{pct(r.trend)}</td><td>{pct(r.score, 1)}</td>"
                  f"<td>{r.pm_hi:.2f} / {r.pm_lo:.2f}</td><td>{r.prev_hi:.2f} / {r.prev_lo:.2f}</td>"
-                 f'<td class="l">{r["div"] or ""}</td><td>{pct(r.fwd_rs)}</td><td>{pct(r.fwd_hi)}</td>'
-                 f'<td>{pct(r.fwd_lo)}</td><td class="news">{news}</td></tr>')
+                 f"<td>{pct(r.fwd_1h)}</td><td>{pct(r.fwd_noon)}</td>"
+                 f"<td>{pct(r.fwd_close)}</td><td>{pct(r.fwd_rs)}</td><td>{pct(r.fwd_hi)}</td>"
+                 f'<td>{pct(r.fwd_lo)}</td><td class="l"><button class="tog" aria-expanded="false">'
+                 f"{summary}</button></td></tr>"
+                 f'<tr class="detail" hidden><td colspan="15">{detail}</td></tr>')
     h.append("</table></div>")
     return "".join(h)
 
@@ -339,31 +483,41 @@ def ranking_table(d: pd.DataFrame, first_col: str = "ticker") -> str:
 @app.route("/day/<day>")
 def day_view(day):
     t = request.args.get("t", DEFAULT_VIEW)
-    d = query("SELECT * FROM scans WHERE day=? AND asof=?", day, t)
+    d = query("SELECT * FROM scans WHERE day=? AND asof=? ORDER BY score DESC", day, t)
     times = query("SELECT DISTINCT asof FROM scans WHERE day=? ORDER BY asof", day)["asof"]
-    if times.empty:
+    if times.empty or d.empty:
         abort(404)
+    news = load_news(list(d.ticker), prev_close(day), et(day, "16:00"))
     m = query("SELECT spy_gap, spy_trend FROM market WHERE day=? AND asof=?", day, t)
     tabs = "".join(f'<a class="{"on" if x == t else ""}" href="?t={x}">{x}</a>' for x in times)
     spy = f"SPY {pp(m.spy_gap[0])} (last {TREND_MIN} min {pp(m.spy_trend[0])})" if not m.empty else ""
     src = "recorded live" if (d.source == "live").any() else "rebuilt from 1-minute history"
-    body = (f"<h1>{day}</h1><p class='mute'>{spy} · {src}. Fwd columns: what happened after {t} "
-            f"(RS to the close vs SPY, best and worst move from the {t} price).</p><div class='tabs'>{tabs}</div>"
-            f"<h2>Relative strength (calls)</h2>{ranking_table(d.nlargest(10, 'score'))}"
-            f"<h2>Relative weakness (puts)</h2>{ranking_table(d.nsmallest(10, 'score'))}")
+    n = min(10, len(d) // 2)
+    strong, weak, rest = d.head(n), d.tail(n).iloc[::-1], d.iloc[n:len(d) - n]
+    body = (f"<h1>{day}</h1><p class='mute'>{spy} · {src}. The +1 hour, Noon and Close columns are the "
+            f"stock's price change from its {t} price. vs SPY to close is the same move after taking out "
+            f"what SPY's move implies. Best and worst are the biggest swings up and down after {t}. "
+            f"Open <i>Why / news</i> for the reasons behind the ranking and the headlines.</p>"
+            f"<div class='tabs'>{tabs}</div>"
+            f"<h2>Relative strength (calls)</h2>{ranking_table(strong, news)}"
+            f"<h2>Relative weakness (puts)</h2>{ranking_table(weak, news)}"
+            f"<h2>The rest of the watchlist ({len(rest)})</h2>"
+            f"<p class='mute'>Not picked at {t}, strongest first.</p>{ranking_table(rest, news)}")
     return page(f"RS {day}", body)
 
 
 @app.route("/ticker/<ticker>")
 def ticker_view(ticker):
     t = request.args.get("t", DEFAULT_VIEW)
-    d = query("SELECT * FROM scans WHERE ticker=? AND asof=? ORDER BY day DESC", ticker.upper(), t)
+    ticker = ticker.upper()
+    d = query("SELECT * FROM scans WHERE ticker=? AND asof=? ORDER BY day DESC", ticker, t)
     if d.empty:
         abort(404)
+    news = load_news([ticker], prev_close(d.day.min()), et(d.day.max(), "16:00"))
     tabs = "".join(f'<a class="{"on" if x == t else ""}" href="?t={x}">{x}</a>' for x in SNAPSHOTS)
-    body = (f"<h1>{ticker.upper()}</h1><p class='mute'>Every recorded session at {t}.</p>"
-            f"<div class='tabs'>{tabs}</div>{ranking_table(d, first_col='day')}")
-    return page(f"RS {ticker.upper()}", body)
+    body = (f"<h1>{ticker}</h1><p class='mute'>Every recorded session at {t}.</p>"
+            f"<div class='tabs'>{tabs}</div>{ranking_table(d, news, first_col='day')}")
+    return page(f"RS {ticker}", body)
 
 
 def main() -> None:

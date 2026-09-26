@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import sys
 import time
 from zoneinfo import ZoneInfo
@@ -77,13 +78,13 @@ def fetch_daily(tickers: list[str]) -> dict[str, pd.DataFrame]:
     return _split(df, tickers)
 
 
-def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> tuple[list[str], int]:
-    """Headlines published in [since, until], company-specific first, and how many name the company."""
+def news_items(ticker: str) -> list[dict]:
+    """Yahoo's latest ~100 headlines for a ticker: time (UTC), title, link, publisher."""
     try:
         items = yf.Ticker(ticker).get_news(count=100) or []
     except Exception:
-        return [], 0
-    heads = []
+        return []
+    out = []
     for it in items:
         c = it.get("content") or it
         ts = c.get("pubDate") or c.get("providerPublishTime")
@@ -93,15 +94,31 @@ def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> tuple[lis
             ts = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
         else:
             continue
-        if since <= ts <= until:
-            heads.append(c.get("title", ""))
-    # Put headlines that name the company first; Yahoo mixes in sector stories.
+        link = ((c.get("canonicalUrl") or {}).get("url") or (c.get("clickThroughUrl") or {}).get("url")
+                or c.get("link") or "")
+        publisher = (c.get("provider") or {}).get("displayName") or c.get("publisher") or ""
+        out.append({"ts": ts, "title": c.get("title", ""), "link": link, "publisher": publisher})
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def company_keys(ticker: str) -> tuple[str, ...]:
+    """Words that mark a headline as being about this company: the ticker and its short name."""
     try:
         name = (yf.Ticker(ticker).info.get("shortName") or "").split()[0].strip(",.")
     except Exception:
         name = ""
-    keys = [k.lower() for k in (ticker, name) if k]
-    named = [h for h in heads if any(k in h.lower() for k in keys)]
+    return tuple(k.lower() for k in (ticker, name) if k)
+
+
+def is_company(ticker: str, title: str) -> bool:
+    return any(k in title.lower() for k in company_keys(ticker))
+
+
+def fetch_news(ticker: str, since: dt.datetime, until: dt.datetime) -> tuple[list[str], int]:
+    """Headlines published in [since, until], company-specific first, and how many name the company."""
+    heads = [n["title"] for n in news_items(ticker) if since <= n["ts"] <= until]
+    named = [h for h in heads if is_company(ticker, h)]
     return named + [h for h in heads if h not in named], len(named)
 
 
@@ -206,6 +223,13 @@ def scan(tickers: list[str], day: dt.date, asof: dt.datetime, trend_min: int,
             row["FwdRS%"] = fwd - beta * spy_fwd
             row["FwdHi%"] = (after["High"].max() / now - 1) * 100
             row["FwdLo%"] = (after["Low"].min() / now - 1) * 100
+            # Price change from the scan price an hour later, at noon, and at the close.
+            closes = today["Close"].dropna()
+            for col, t in (("Fwd1h%", asof + dt.timedelta(hours=1)),
+                           ("FwdNoon%", dt.datetime.combine(day, dt.time(12, 0), tzinfo=NY))):
+                if asof < t <= closes.index[-1]:
+                    row[col] = (last_at(closes, t) / now - 1) * 100
+            row["FwdClose%"] = fwd
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("Ticker")
