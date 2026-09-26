@@ -25,10 +25,14 @@ import time
 import traceback
 from pathlib import Path
 
-import pandas as pd
-from flask import Flask, abort, render_template_string, request
+try:
+    import pandas as pd
+    from flask import Flask, abort, render_template_string, request
 
-import premarket_rs as rs
+    import premarket_rs as rs
+except ModuleNotFoundError as e:
+    sys.exit(f"Missing Python library: {e.name}. Run ./setup.sh (Mac/Linux) to install everything, "
+             f"then use .venv/bin/python app.py ...")
 
 SNAPSHOTS = ["08:00", "08:30", "09:00", "09:15", "09:29", "09:35", "09:45", "10:00"]
 DEFAULT_VIEW = "09:35"
