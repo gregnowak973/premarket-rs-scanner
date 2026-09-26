@@ -25,7 +25,6 @@ DEFAULT_VIEW = core.DEFAULT_VIEW
 TREND_MIN = core.TREND_MIN
 TOP_N = core.TOP_N
 CARDS = 2                     # pick cards per side
-NOISE = 0.3                   # spreads within ±0.3% are indistinguishable from noise
 OUTCOME_SCALE = 3.0           # outcome bars span ±3%
 
 web = Flask(__name__)
@@ -490,14 +489,12 @@ def dot_plot(stats: pd.DataFrame) -> str:
     """Spread per snapshot with ±1 standard error, noise band, and hit counts."""
     if stats.empty:
         return ""
-    lo = min(-1.0, (stats.spread - stats.se.fillna(0)).min() * 1.15)
-    hi = max(1.0, (stats.spread + stats.se.fillna(0)).max() * 1.15)
+    lo = min(-1.0, (stats.spread - 2 * stats.se.fillna(0)).min() * 1.1)
+    hi = max(1.0, (stats.spread + 2 * stats.se.fillna(0)).max() * 1.1)
     W, L, R, top, rh = 480, 78, 62, 26, 28
     H = top + rh * len(stats) + 18
     x = lambda v: L + (v - lo) / (hi - lo) * (W - L - R)
     out = [f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="Spread by snapshot time">',
-           f'<rect x="{x(-NOISE):.1f}" y="{top - 8}" width="{x(NOISE) - x(-NOISE):.1f}" height="{rh * len(stats)}" '
-           f'fill="var(--line)" opacity=".55"/>',
            f'<line x1="{x(0):.1f}" x2="{x(0):.1f}" y1="{top - 10}" y2="{top + rh * len(stats) - 4}" stroke="var(--fg)" opacity=".45"/>']
     for tick in sorted({round(lo), 0, round(hi)} | {v for v in (-2, -1, 1, 2) if lo < v < hi}):
         out.append(f'<text x="{x(tick):.1f}" y="{H - 2}" text-anchor="middle" class="mute">{tick:+d}%</text>')
@@ -506,15 +503,15 @@ def dot_plot(stats: pd.DataFrame) -> str:
     for i, s in enumerate(stats.itertuples()):
         y = top + i * rh + 6
         ctx = s.asof < TRADE_FROM
-        clear = pd.notna(s.se) and s.spread - s.se > 0
+        clear = pd.notna(s.se) and s.spread - 2 * s.se > 0
         col = "var(--acc)" if clear else "var(--fg)"
         out.append(f'<a href="/review?t={s.asof}"><text x="8" y="{y + 4}" class="{"mute" if ctx else ""}">'
                    f'{s.asof}{" pre" if ctx else ""}</text></a>')
         if pd.notna(s.se):
-            out.append(f'<line x1="{x(s.spread - s.se):.1f}" x2="{x(s.spread + s.se):.1f}" y1="{y}" y2="{y}" '
+            out.append(f'<line x1="{x(s.spread - 2 * s.se):.1f}" x2="{x(s.spread + 2 * s.se):.1f}" y1="{y}" y2="{y}" '
                        f'stroke="{col}" stroke-width="2" opacity=".6"/>')
         out.append(f'<circle cx="{x(s.spread):.1f}" cy="{y}" r="{5.5 if clear else 4.5}" fill="{col}"'
-                   f'{"" if not ctx else " opacity=.55"}><title>{s.asof}: {s.spread:+.2f}% ± {s.se:.2f}</title></circle>')
+                   f'{"" if not ctx else " opacity=.55"}><title>{s.asof}: {s.spread:+.2f}%, likely range {s.spread - 2 * s.se:+.2f} to {s.spread + 2 * s.se:+.2f}</title></circle>')
         out.append(f'<text x="{x(s.spread):.1f}" y="{y - 8}" text-anchor="middle" class="mute" font-size="11">{s.spread:+.2f}</text>')
         out.append(f'<text x="{W - R + 8}" y="{y + 4}" class="{"" if clear else "mute"}">{s.hits}/{s.days}</text>')
     out.append("</svg>")
@@ -552,14 +549,15 @@ def verdict(stats: pd.DataFrame, n_days: int) -> str:
     pre, trade = stats[stats["asof"] < TRADE_FROM], stats[stats["asof"] >= TRADE_FROM]
     if trade.empty:
         return ""
-    clear = trade[(trade.spread - trade.se) > 0]
+    clear = trade[(trade.spread - 2 * trade.se) > 0]
     t_bits = ", ".join(f"{s.hits}/{s.days} days at {s.asof}" for s in trade.itertuples())
     p_rng = f"{pre.hits.min()}–{pre.hits.max()} of {pre.days.max()}" if not pre.empty else "n/a"
-    head = ("Act from 09:35, not premarket." if not clear.empty and (pre.spread - pre.se).max() <= 0
+    head = ("Act from 09:35, not premarket." if not clear.empty and (pre.spread - 2 * pre.se).max() <= 0
             else "No snapshot time clearly works yet." if clear.empty else "Several snapshot times look positive.")
     return (f'<div class="card verdict"><b>{head}</b><br>Strong names beat weak ones on {t_bits}; '
-            f"premarket snapshots {p_rng}. With {n_days} days, spreads within ±{NOISE}% (the grey band) are noise; "
-            f"highlighted dots are clearly above zero.</div>")
+            f"premarket snapshots {p_rng}. Each line is the likely range for that time (±2 standard errors, "
+            f"{n_days} days); blue dots are the times whose whole range is above zero. "
+            f"Clear so far: {', '.join(clear['asof']) or 'none'}.</div>")
 
 
 @web.route("/review")
@@ -823,7 +821,9 @@ def day_view(day):
     body.append(f'<details class="rest"><summary>The other {len(rest)} on the watchlist</summary>'
                 f"{rank_table(rest, side='', **args)}</details>")
 
-    src = "recorded live" if (d.source == "live").any() else "rebuilt from 1-minute history"
+    src = ("recorded live" if (d.source == "live").any() else
+           "rebuilt from 5-minute history (a little coarser than 1-minute days)" if (d.source == "replay-5m").any()
+           else "rebuilt from 1-minute history")
     return page(f"{short_day(day)} {t} · RS Scanner", "".join(body), page="today" if day == now_ny().date().isoformat() else "day",
                 pills=snapshot_pills(href, times, t), stepper=stepper, footer=f"This day was {src}",
                 prev=f"/day/{p_day}?t={t}" if p_day else "", next=f"/day/{n_day}?t={t}" if n_day else "",

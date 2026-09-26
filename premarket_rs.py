@@ -63,12 +63,17 @@ def _split(df: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
 
 
 def fetch_intraday(tickers: list[str], start: dt.date | None = None,
-                   end: dt.date | None = None) -> dict[str, pd.DataFrame]:
-    """1-minute bars including pre/post market. Yahoo allows 8 days per request, last 30 days."""
-    when = dict(start=start, end=end) if start else dict(period="8d")
-    df = yf.download(tickers, interval="1m", prepost=True, progress=False,
+                   end: dt.date | None = None, interval: str = "1m") -> dict[str, pd.DataFrame]:
+    """Bars including pre/post market. Yahoo keeps 1-minute bars ~30 days (8 per request)
+    and 5-minute bars ~60 days.
+
+    Bars are labelled so a bar stamped t closes at t + 1 minute, whatever the interval, so
+    last_at(t) never sees a price from after t + 1 minute (a 5-minute bar is stamped 4 minutes late).
+    """
+    when = dict(start=start, end=end) if start else dict(period="8d" if interval == "1m" else "60d")
+    df = yf.download(tickers, interval=interval, prepost=True, progress=False,
                      group_by="ticker", threads=True, **when)
-    df.index = df.index.tz_convert(NY)
+    df.index = df.index.tz_convert(NY) + (pd.Timedelta(interval) - pd.Timedelta("1min"))
     return _split(df, tickers)
 
 

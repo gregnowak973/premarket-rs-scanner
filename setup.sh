@@ -1,5 +1,5 @@
 #!/bin/sh
-# One-time setup on macOS/Linux: private Python environment, libraries, 30-day backfill,
+# One-time setup on macOS/Linux: private Python environment, libraries, ~60-day backfill,
 # background schedule. Safe to run again (e.g. after `git pull`).
 set -e
 cd "$(dirname "$0")"
@@ -10,6 +10,6 @@ fi
 echo "Installing libraries ..."
 .venv/bin/python -m pip install --quiet --no-cache-dir --upgrade pip
 .venv/bin/python -m pip install --quiet --no-cache-dir -r requirements.txt
-echo "Loading the last ~30 days (about a minute) ..."
-.venv/bin/python app.py backfill
+echo "Loading the last ~60 days (a few minutes the first time) ..."
+.venv/bin/python app.py backfill --deep
 .venv/bin/python app.py schedule

@@ -18,7 +18,7 @@ python premarket_rs.py --file watchlist.txt --csv out.csv   # same list the reco
 ```
 ./setup.sh
 ```
-This creates a private Python environment in `.venv`, installs the libraries, rebuilds the last ~30 days from Yahoo's 1-minute history (about a minute), schedules the background jobs, and opens the site. Run it again after `git pull`. For other commands, use that environment's Python: `.venv/bin/python app.py status`.
+This creates a private Python environment in `.venv`, installs the libraries, rebuilds the last ~30 days from Yahoo's 1-minute history and the ~30 before that from 5-minute bars (a few minutes the first time), schedules the background jobs, and opens the site. Run it again after `git pull`. For other commands, use that environment's Python: `.venv/bin/python app.py status`.
 
 On Windows, run the same steps by hand: `py -m venv .venv`, `.venv\Scripts\python -m pip install -r requirements.txt`, then `.venv\Scripts\python app.py backfill` and `.venv\Scripts\python app.py schedule`.
 
@@ -26,7 +26,7 @@ On Windows, run the same steps by hand: `py -m venv .venv`, `.venv\Scripts\pytho
 - **Recorder:** `python app.py record` runs every 5 minutes. On weekdays it takes snapshots at 08:00, 08:30, 09:00, 09:15, 09:29, 09:35, 09:45 and 10:00 ET, with headlines. Snapshot times are ET whatever your time zone.
 - **Website:** starts when you log in and stays up at http://127.0.0.1:8050.
 
-**Missed days are filled in automatically.** Each run checks the last ~30 days for any weekday that isn't recorded, whether the computer was off, asleep or offline. It rebuilds those days from Yahoo's 1-minute history, then adds rest-of-day outcomes once each session closes. Rebuilt days have prices and outcomes but no headlines, because Yahoo drops old news. Days older than ~30 days can't be recovered.
+**Missed days are filled in automatically.** Each run checks the last ~30 days for any weekday that isn't recorded, whether the computer was off, asleep or offline. It rebuilds those days from Yahoo's 1-minute history, then adds rest-of-day outcomes once each session closes. Rebuilt days have prices and outcomes but no headlines, because Yahoo drops old news. Days older than ~30 days can't be rebuilt from 1-minute bars; `python app.py backfill --deep` (run by `setup.sh`) fills sessions back to ~60 days from 5-minute bars. Those scores are a little coarser (on overlapping days they correlate 0.95–0.99 with the 1-minute scores) and the site labels them.
 
 `python app.py unschedule` removes both jobs. Logs are in `data/record.log` and `data/site.log`. On macOS, keep the folder outside Documents/Desktop/Downloads, or allow Python access when macOS asks; otherwise the background job can't read it.
 

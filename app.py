@@ -4,6 +4,7 @@ Records the RS scanner every trading morning and serves the history on a local w
 
     python app.py              # website at http://127.0.0.1:8050, records scans while it runs
     python app.py backfill     # load the last ~30 trading days from Yahoo (run once)
+    python app.py backfill --deep   # also rebuild older days (~60 total) from 5-minute bars
     python app.py record       # record whatever is due right now, catch up missed days, then exit
     python app.py schedule     # run `record` every 5 minutes in the background (macOS, Windows, Linux)
     python app.py unschedule   # remove that background job
@@ -111,7 +112,7 @@ def db() -> sqlite3.Connection:
 def save(con, day: dt.date, hhmm: str, df: pd.DataFrame, source: str) -> None:
     """Live rows overwrite everything but outcomes; replay rows only fill outcomes and gaps."""
     names = ["day", "asof", "ticker", "source"] + list(COLS.values())
-    keep = FWD if source == "replay" else [c for c in COLS.values() if c not in FWD] + ["source"]
+    keep = FWD if source.startswith("replay") else [c for c in COLS.values() if c not in FWD] + ["source"]
     sql = (f"INSERT INTO scans ({', '.join(names)}) VALUES ({', '.join('?' * len(names))}) "
            f"ON CONFLICT(day, asof, ticker) DO UPDATE SET "
            + ", ".join(f"{c}=excluded.{c}" for c in keep))
@@ -180,7 +181,7 @@ def record_live(day: dt.date, hhmm: str) -> None:
     print(f"{day} {hhmm}: recorded {len(df)} tickers")
 
 
-def record_outcomes(days: list[dt.date], intraday, daily) -> None:
+def record_outcomes(days: list[dt.date], intraday, daily, source: str = "replay") -> None:
     """Replay every snapshot time for finished sessions and fill in what happened next."""
     now = dt.datetime.now(rs.NY)
     for day in days:
@@ -194,7 +195,7 @@ def record_outcomes(days: list[dt.date], intraday, daily) -> None:
             if df.empty:
                 continue
             with lock, db() as con:
-                save(con, day, hhmm, df, "replay")
+                save(con, day, hhmm, df, source)
         with lock, db() as con:
             con.execute("INSERT OR REPLACE INTO done VALUES (?)", (day.isoformat(),))
         print(f"{day}: outcomes recorded")
@@ -238,6 +239,23 @@ def catch_up(now: dt.datetime, force: bool = False) -> None:
                 con.execute("INSERT OR IGNORE INTO done VALUES (?)", (d.isoformat(),))
 
 
+def backfill_deep() -> None:
+    """Sessions older than the 1-minute history, rebuilt from Yahoo's 5-minute bars (~60 days).
+
+    Scores use 5-minute prices, so they're a little coarser than the 1-minute days; the
+    site labels these days. Days already recorded are left alone.
+    """
+    tickers = sorted(set(load_tickers()) | {rs.BENCH})
+    print("Loading ~60 days of 5-minute bars from Yahoo...")
+    intraday = rs.fetch_intraday(tickers, interval="5m")
+    daily = rs.fetch_daily(tickers)
+    with db() as con:
+        have = {r[0] for r in con.execute("SELECT DISTINCT day FROM scans")}
+    days = [d for d in trading_days(intraday) if d.isoformat() not in have]
+    print(f"{len(days)} older session(s) to rebuild")
+    record_outcomes(days, intraday, daily, source="replay-5m")
+
+
 def record_due(now: dt.datetime, taken: set) -> None:
     """Take any snapshot due in the last 10 minutes, then catch up on finished sessions."""
     if now.weekday() < 5:
@@ -269,6 +287,8 @@ def main() -> None:
     if cmd == "backfill":
         print("Loading the last ~30 days from Yahoo...")
         catch_up(dt.datetime.now(rs.NY), force=True)
+        if "--deep" in sys.argv:
+            backfill_deep()
     elif cmd == "record":
         DB.parent.mkdir(exist_ok=True)
         with open(DB.with_name("record.log"), "a") as log:  # scheduled runs have no console
