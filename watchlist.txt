@@ -1,0 +1,52 @@
+# Tickers the scanner ranks every morning. One per line; anything after # is ignored.
+# Picked for liquid options (weeklies, tight spreads). Add a name the night before if it has
+# earnings or news coming; the next scan picks up the change.
+
+# Index ETFs (SPY is always the benchmark)
+QQQ
+IWM
+DIA
+
+# Mega-cap tech
+AAPL
+MSFT
+NVDA
+AMZN
+GOOGL
+META
+TSLA
+AVGO
+AMD
+
+# Software, chips and high-beta tech
+NFLX
+ORCL
+CRM
+ADBE
+INTC
+MU
+QCOM
+ARM
+SMCI
+PLTR
+COIN
+MSTR
+HOOD
+UBER
+SHOP
+SNOW
+PANW
+CRWD
+
+# Financials, consumer, healthcare, energy, industrials
+JPM
+BAC
+GS
+WMT
+COST
+HD
+LLY
+UNH
+XOM
+BA
+DIS

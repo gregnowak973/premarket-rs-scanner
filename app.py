@@ -4,12 +4,15 @@ Records the RS scanner every trading morning and serves the history on a local w
 
     python app.py              # website at http://localhost:8050, records scans while it runs
     python app.py backfill     # load the last ~30 trading days from Yahoo (run once)
-    python app.py record       # record whatever is due right now, then exit (for cron/Task Scheduler)
+    python app.py record       # record whatever is due right now, catch up missed days, then exit
+    python app.py schedule     # run `record` every 5 minutes in the background (macOS, Windows, Linux)
+    python app.py unschedule   # remove that background job
 
 While the site is running it takes a snapshot at each time in SNAPSHOTS on weekdays,
 with headlines, and after 16:05 ET fills in what each stock did for the rest of the day.
-Snapshots it missed (the app wasn't running) are filled in from Yahoo's 1-minute
-history at the end of the day, without headlines.
+Any session it missed (the computer was off or asleep) is rebuilt from Yahoo's
+1-minute history the next time it runs, as long as it's within the last ~30 days.
+Rebuilt snapshots have prices and outcomes but no headlines.
 """
 from __future__ import annotations
 
@@ -30,7 +33,17 @@ SNAPSHOTS = ["08:00", "08:30", "09:00", "09:15", "09:29", "09:35", "09:45", "10:
 DEFAULT_VIEW = "09:35"
 TREND_MIN = 45
 TOP_N = 5
-TICKERS = rs.DEFAULT_UNIVERSE
+WATCHLIST = Path(__file__).with_name("watchlist.txt")
+
+
+def load_tickers() -> list[str]:
+    """watchlist.txt (one ticker per line, # for comments), re-read on every scan."""
+    if not WATCHLIST.exists():
+        return rs.DEFAULT_UNIVERSE
+    names = [l.split("#")[0].strip().upper() for l in WATCHLIST.read_text().splitlines()]
+    return list(dict.fromkeys(n for n in names if n)) or rs.DEFAULT_UNIVERSE
+
+
 DB = Path(__file__).with_name("data") / "scans.db"
 PORT = 8050
 
@@ -59,6 +72,7 @@ def db() -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS market (
             day TEXT, asof TEXT, spy_gap REAL, spy_trend REAL, PRIMARY KEY (day, asof));
         CREATE TABLE IF NOT EXISTS done (day TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
     """)
     return con
 
@@ -80,7 +94,7 @@ def save(con, day: dt.date, hhmm: str, df: pd.DataFrame, source: str) -> None:
 
 
 def load_market(start: dt.date | None = None):
-    tickers = sorted(set(TICKERS) | {rs.BENCH})
+    tickers = sorted(set(load_tickers()) | {rs.BENCH})
     if start is None:
         intraday = rs.fetch_intraday(tickers)
     else:  # stitch 7-day chunks together; Yahoo caps 1-minute requests at 8 days
@@ -107,7 +121,7 @@ def record_live(day: dt.date, hhmm: str) -> None:
     if rs.BENCH not in intraday or day not in set(intraday[rs.BENCH].index.date):
         print(f"{day} {hhmm}: no session today (holiday?), skipping")
         return
-    df = rs.scan(TICKERS, day, at(day, hhmm), TREND_MIN, intraday, daily, with_news=True)
+    df = rs.scan(load_tickers(), day, at(day, hhmm), TREND_MIN, intraday, daily, with_news=True)
     with lock, db() as con:
         save(con, day, hhmm, df, "live")
     print(f"{day} {hhmm}: recorded {len(df)} tickers")
@@ -121,7 +135,7 @@ def record_outcomes(days: list[dt.date], intraday, daily) -> None:
             continue
         for hhmm in SNAPSHOTS:
             try:
-                df = rs.scan(TICKERS, day, at(day, hhmm), TREND_MIN, intraday, daily, with_news=False)
+                df = rs.scan(load_tickers(), day, at(day, hhmm), TREND_MIN, intraday, daily, with_news=False)
             except Exception:  # first day in the data has no prior session
                 break
             if df.empty:
@@ -137,34 +151,53 @@ def trading_days(intraday) -> list[dt.date]:
     return sorted(set(intraday[rs.BENCH].index.date))
 
 
-def backfill() -> None:
-    start = dt.datetime.now(rs.NY).date() - dt.timedelta(days=29)
-    print(f"Loading 1-minute bars since {start}...")
-    intraday, daily = load_market(start)
-    record_outcomes(trading_days(intraday), intraday, daily)
+def catch_up(now: dt.datetime, force: bool = False) -> None:
+    """Fill in every finished session from the last ~30 days that isn't recorded yet.
+
+    Covers days the computer was off or asleep, and today's outcomes after the close.
+    Tries at most once an hour unless forced, so a holiday doesn't trigger a fetch every run.
+    """
+    last_done = now.date() if now.time() >= dt.time(16, 5) else now.date() - dt.timedelta(days=1)
+    oldest = now.date() - dt.timedelta(days=29)  # Yahoo keeps 1-minute bars for about 30 days
+    with db() as con:
+        done = {r[0] for r in con.execute("SELECT day FROM done")}
+        tried = con.execute("SELECT value FROM state WHERE key='catch_up'").fetchone()
+    missing = [d for d in (oldest + dt.timedelta(days=i) for i in range((last_done - oldest).days + 1))
+               if d.weekday() < 5 and d.isoformat() not in done]
+    if not missing:
+        return
+    if not force and tried and now - dt.datetime.fromisoformat(tried[0]) < dt.timedelta(hours=1):
+        return
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO state VALUES ('catch_up', ?)", (now.isoformat(),))
+    print(f"{now:%Y-%m-%d %H:%M}: catching up {len(missing)} weekday(s) from {missing[0]}")
+    intraday, daily = load_market(max(oldest, missing[0] - dt.timedelta(days=5)))
+    if rs.BENCH not in intraday:
+        print("No data from Yahoo; will retry later")
+        return
+    sessions = trading_days(intraday)
+    record_outcomes([d for d in sessions if d in missing], intraday, daily)
+    # Weekdays with no session (holidays) count as done once Yahoo has data past them.
+    with db() as con:
+        for d in missing:
+            if d < sessions[-1]:
+                con.execute("INSERT OR IGNORE INTO done VALUES (?)", (d.isoformat(),))
 
 
 def record_due(now: dt.datetime, taken: set) -> None:
-    """Take any snapshot due in the last 10 minutes, and outcomes after the close."""
-    if now.weekday() >= 5:
-        return
-    for hhmm in SNAPSHOTS:
-        due = at(now.date(), hhmm)
-        if (now.date(), hhmm) in taken or not due <= now < due + dt.timedelta(minutes=10):
-            continue
-        taken.add((now.date(), hhmm))
-        with db() as con:
-            have = con.execute("SELECT 1 FROM scans WHERE day=? AND asof=? AND source='live'",
-                                (now.date().isoformat(), hhmm)).fetchone()
-        if not have:
-            record_live(now.date(), hhmm)
-    if now.time() >= dt.time(16, 5):
-        with db() as con:
-            finished = con.execute("SELECT 1 FROM done WHERE day=?", (now.date().isoformat(),)).fetchone()
-        if not finished:
-            intraday, daily = load_market()
-            record_outcomes([d for d in trading_days(intraday) if d >= now.date() - dt.timedelta(days=5)],
-                            intraday, daily)
+    """Take any snapshot due in the last 10 minutes, then catch up on finished sessions."""
+    if now.weekday() < 5:
+        for hhmm in SNAPSHOTS:
+            due = at(now.date(), hhmm)
+            if (now.date(), hhmm) in taken or not due <= now < due + dt.timedelta(minutes=10):
+                continue
+            taken.add((now.date(), hhmm))
+            with db() as con:
+                have = con.execute("SELECT 1 FROM scans WHERE day=? AND asof=? AND source='live'",
+                                    (now.date().isoformat(), hhmm)).fetchone()
+            if not have:
+                record_live(now.date(), hhmm)
+    catch_up(now)
 
 
 def scheduler() -> None:
@@ -331,12 +364,27 @@ def ticker_view(ticker):
 def main() -> None:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "serve"
     if cmd == "backfill":
-        backfill()
+        print("Loading the last ~30 days from Yahoo...")
+        catch_up(dt.datetime.now(rs.NY), force=True)
     elif cmd == "record":
-        record_due(dt.datetime.now(rs.NY), set())
+        DB.parent.mkdir(exist_ok=True)
+        with open(DB.with_name("record.log"), "a") as log:  # scheduled runs have no console
+            sys.stdout = sys.stderr = log
+            try:
+                record_due(dt.datetime.now(rs.NY), set())
+            except Exception:
+                traceback.print_exc()
+    elif cmd in ("schedule", "unschedule"):
+        import scheduling
+        scheduling.install() if cmd == "schedule" else scheduling.remove()
     elif cmd == "serve":
-        threading.Thread(target=scheduler, daemon=True).start()
-        print(f"RS scanner log: http://localhost:{PORT}  (recording {', '.join(SNAPSHOTS)} ET on weekdays)")
+        if sys.stdout is None:  # started hidden (pythonw), so log to a file
+            DB.parent.mkdir(exist_ok=True)
+            sys.stdout = sys.stderr = open(DB.with_name("site.log"), "a", buffering=1)
+        if "--site-only" not in sys.argv:  # the scheduled `record` job does the recording instead
+            threading.Thread(target=scheduler, daemon=True).start()
+            print(f"Recording {', '.join(SNAPSHOTS)} ET on weekdays")
+        print(f"RS scanner log: http://localhost:{PORT}")
         app.run(host="127.0.0.1", port=PORT)
     else:
         sys.exit(__doc__)
