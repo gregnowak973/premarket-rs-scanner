@@ -54,6 +54,19 @@ def load_tickers() -> list[str]:
 DB = Path(__file__).with_name("data") / "scans.db"
 PORT = 8050
 
+
+def version() -> str:
+    """Commit this copy is running, shown in the page footer."""
+    try:
+        import subprocess
+        return subprocess.run(["git", "log", "-1", "--format=%h %cd", "--date=format:%b %d %H:%M"],
+                              cwd=Path(__file__).parent, capture_output=True, text=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+VERSION = version()
+
 # scan() column -> database column
 COLS = {
     "Last": "last", "Gap%": "gap", "Beta": "beta", "RS%": "rs", "RSz": "rsz",
@@ -325,6 +338,7 @@ nav{margin-bottom:16px}
 </style></head><body><main>
 <nav><a href="/">RS scanner log</a></nav>
 {{ body|safe }}
+<footer class="mute" style="margin-top:32px;font-size:12px">Version {{ version }}</footer>
 </main>
 <script>
 document.addEventListener("click", e => {
@@ -347,7 +361,7 @@ def pp(v):
 
 
 def page(title: str, body: str) -> str:
-    return render_template_string(BASE, title=title, body=body)
+    return render_template_string(BASE, title=title, body=body, version=VERSION)
 
 
 @app.route("/")

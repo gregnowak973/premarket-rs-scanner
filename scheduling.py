@@ -68,6 +68,8 @@ def _mac_install() -> None:
            "<key>StartInterval</key><integer>300</integer>", LOG)
     _plist(SITE_PLIST, SITE_LABEL, [python(), str(APP), "serve", "--site-only"],
            "<key>KeepAlive</key><true/>", SITE_LOG)
+    # launchctl load doesn't always restart a running job, so force the site onto the new code.
+    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{SITE_LABEL}"], capture_output=True)
 
 
 def _mac_remove() -> None:
@@ -186,12 +188,24 @@ def status() -> None:
     print(f"Recorder log ({LOG.name}):\n{_tail(LOG, 8)}")
 
 
+def stop_old_site() -> None:
+    """Stop whatever is serving the port (an old version, or one started by hand)."""
+    if platform.system() == "Windows":
+        return
+    pids = subprocess.run(["lsof", "-ti", "tcp:8050", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+    for pid in pids:
+        subprocess.run(["kill", pid], capture_output=True)
+    if pids:
+        time.sleep(1)
+
+
 def install() -> None:
     if folder := protected_folder():
         sys.exit(f"This folder is inside ~/{folder}, and macOS won't let background jobs read it.\n"
                  f"Move it to your home folder, then schedule again:\n\n"
                  f'  mv "{HERE}" ~/{NAME}\n  cd ~/{NAME}\n  ./setup.sh\n')
     LOG.parent.mkdir(exist_ok=True)
+    stop_old_site()
     system = platform.system()
     {"Darwin": _mac_install, "Windows": _win_install}.get(system, _cron_install)()
     print(f"Scheduled ({system}): the recorder runs every 5 minutes, and the website starts at login.")
