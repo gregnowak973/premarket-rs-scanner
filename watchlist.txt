@@ -50,3 +50,9 @@ UNH
 XOM
 BA
 DIS
+
+# Precious metals (gold ETF, gold miners ETF, two large gold miners)
+GLD
+GDX
+NEM
+AEM
